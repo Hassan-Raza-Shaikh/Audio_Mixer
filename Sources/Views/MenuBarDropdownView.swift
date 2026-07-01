@@ -288,7 +288,7 @@ public struct MenuBarDropdownView: View {
                         .padding(.vertical, 6)
                         .background(Color.accentColor.opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .foregroundStyle(.accent)
+                        .foregroundStyle(Color.accentColor)
                     }
                     .buttonStyle(.plain)
                     

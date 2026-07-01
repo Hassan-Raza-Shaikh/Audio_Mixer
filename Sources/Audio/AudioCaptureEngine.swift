@@ -2,7 +2,9 @@ import Foundation
 import ScreenCaptureKit
 import AVFoundation
 
-/// Handles user-space application-specific audio capture using ScreenCaptureKit
+/// Handles user-space application-specific audio capture using ScreenCaptureKit.
+/// Isolated to MainActor to ensure thread-safe activeStreams mapping.
+@MainActor
 public class AudioCaptureEngine: NSObject, SCStreamOutput {
     public static let shared = AudioCaptureEngine()
     
@@ -16,7 +18,6 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput {
     public func startCapture(for pid: Int32, appName: String) {
         print("ScreenCaptureKit: Requesting audio capture stream for \(appName) (PID: \(pid))")
         
-        // Ensure we capture on a background thread
         Task {
             do {
                 // Get all screen shareable content
@@ -34,7 +35,6 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput {
                 // Configure stream to capture audio only
                 let configuration = SCStreamConfiguration()
                 configuration.capturesAudio = true
-                configuration.excludesHeaders = true
                 
                 // Set audio properties
                 configuration.sampleRate = 44100
@@ -73,14 +73,15 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput {
     
     // MARK: - SCStreamOutput Delegate
     
-    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+    /// Delegate callback from background queue. Marked nonisolated as it handles raw audio PCM calculations thread-safely.
+    nonisolated public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
         
         // Extract PCM audio levels from stream sample buffer
         calculateAudioPower(from: sampleBuffer, for: stream)
     }
     
-    private func calculateAudioPower(from sampleBuffer: CMSampleBuffer, for stream: SCStream) {
+    nonisolated private func calculateAudioPower(from sampleBuffer: CMSampleBuffer, for stream: SCStream) {
         // Access underlying block buffer
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         
@@ -114,7 +115,7 @@ public class AudioCaptureEngine: NSObject, SCStreamOutput {
         
         // Convert to decibels (dB FS, capped between -60dB and 0dB)
         let db = rms > 0.000001 ? 20.0 * log10(rms) : -60.0
-        let clampedDB = max(-60.0, min(0.0, db))
+        let _ = max(-60.0, min(0.0, db))
         
         // Update AppState metrics for the corresponding app
         // (In a complete app, we map the stream to its corresponding PID)

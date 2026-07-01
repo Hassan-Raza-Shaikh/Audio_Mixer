@@ -2,7 +2,7 @@ import Foundation
 import CoreAudio
 
 /// Manages system-level CoreAudio hardware queries and operations
-public class AudioDeviceManager {
+public final class AudioDeviceManager: Sendable {
     public static let shared = AudioDeviceManager()
     
     private init() {}
@@ -93,12 +93,12 @@ public class AudioDeviceManager {
             mElement: kAudioObjectPropertyElementMain
         )
         
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
-        var nameCF: CFString = "" as CFString
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var nameCF: Unmanaged<CFString>?
         
         let status = AudioObjectGetPropertyData(deviceID, &propertyAddress, 0, nil, &dataSize, &nameCF)
-        if status == noErr {
-            return nameCF as String
+        if status == noErr, let name = nameCF?.takeRetainedValue() {
+            return name as String
         }
         return "Unknown Device (\(deviceID))"
     }
@@ -110,12 +110,12 @@ public class AudioDeviceManager {
             mElement: kAudioObjectPropertyElementMain
         )
         
-        var dataSize = UInt32(MemoryLayout<CFString>.size)
-        var uidCF: CFString = "" as CFString
+        var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var uidCF: Unmanaged<CFString>?
         
         let status = AudioObjectGetPropertyData(deviceID, &propertyAddress, 0, nil, &dataSize, &uidCF)
-        if status == noErr {
-            return uidCF as String
+        if status == noErr, let uid = uidCF?.takeRetainedValue() {
+            return uid as String
         }
         return "device_uid_\(deviceID)"
     }

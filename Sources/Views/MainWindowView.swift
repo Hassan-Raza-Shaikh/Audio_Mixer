@@ -141,11 +141,11 @@ public struct MainWindowView: View {
                                 
                                 Image(systemName: "headphones")
                                     .font(.system(size: 20))
-                                    .foregroundStyle(.accent)
+                                    .foregroundStyle(Color.accentColor)
                             }
                             Text("YOU")
                                 .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .foregroundStyle(.accent)
+                                .foregroundStyle(Color.accentColor)
                         }
                         .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
                         
@@ -209,7 +209,15 @@ public struct MainWindowView: View {
                             }
                             
                             VStack(alignment: .leading, spacing: 4) {
-                                let panText = app.pan < -0.05 ? "Left (\(Int(abs(app.pan)*100))%)" : (app.pan > 0.05 ? "Right (\(Int(app.pan)*100))%)" : "Center"
+                                let panText: String = {
+                                    if app.pan < -0.05 {
+                                        return "Left (\(Int(abs(app.pan) * 100))%)"
+                                    } else if app.pan > 0.05 {
+                                        return "Right (\(Int(app.pan) * 100))%)"
+                                    } else {
+                                        return "Center"
+                                    }
+                                }()
                                 Text("Panning: \(panText)")
                                     .font(.system(size: 11, weight: .medium))
                                 Slider(value: Binding(
@@ -298,26 +306,26 @@ public struct MainWindowView: View {
             .background(.ultraThinMaterial)
         }
         .frame(width: 670, height: 450)
-        .background(VisualEffectView(material: .headerView, vibrancy: .withinWindow))
+        .background(VisualEffectView(material: .headerView, blendingMode: .withinWindow))
     }
 }
 
 // Helper NSVisualEffectView wrapper for native vibrant window backgrounds
 struct VisualEffectView: NSViewRepresentable {
     var material: NSVisualEffectView.Material
-    var vibrancy: NSVisualEffectView.Vibrancy
+    var blendingMode: NSVisualEffectView.BlendingMode
     
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
         view.material = material
-        view.vibrancy = vibrancy
+        view.blendingMode = blendingMode
         view.state = .active
         return view
     }
     
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = material
-        nsView.vibrancy = vibrancy
+        nsView.blendingMode = blendingMode
     }
 }
 
