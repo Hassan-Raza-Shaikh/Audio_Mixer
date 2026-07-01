@@ -1,7 +1,8 @@
 import SwiftUI
 import Combine
 
-/// Represents an audio output device available on the system
+// MARK: - Audio Device
+
 public struct AudioDevice: Identifiable, Hashable {
     public let id: String
     public let name: String
@@ -13,85 +14,82 @@ public struct AudioDevice: Identifiable, Hashable {
         self.isDefault = isDefault
     }
     
-    /// Short display name (truncated for compact UI)
     public var shortName: String {
+        // Show first two words max
         let parts = name.components(separatedBy: " ")
         if parts.count > 2 { return parts.prefix(2).joined(separator: " ") }
         return name
     }
 }
 
-/// Apps that are known to produce audio, shown with priority
-private let knownAudioBundleIds: [String] = [
-    "com.spotify.client", "com.apple.Music", "com.apple.podcasts",
-    "us.zoom.xos", "com.microsoft.teams", "com.microsoft.teams2",
+// MARK: - Known Audio Apps
+
+private let knownAudioBundlePrefixes: [String] = [
+    "com.spotify.client", "com.apple.Music", "com.apple.music",
+    "com.apple.podcasts", "com.apple.TV",
+    "us.zoom.xos", "com.microsoft.teams",
     "com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
     "com.brave.Browser", "com.microsoft.edgemac",
-    "com.apple.FaceTime", "com.discord.Discord", "com.hnc.Discord",
+    "com.apple.FaceTime", "com.discord", "com.hnc.Discord",
     "com.apple.QuickTimePlayerX", "io.mpv", "com.colliderli.iina",
-    "com.apple.TV", "com.apple.music", "com.tidal.desktop",
-    "com.netflix.Netflix", "com.amazon.PrimeVideo"
+    "com.tidal.desktop", "com.netflix", "com.amazon.PrimeVideo"
 ]
 
-/// Represents an application that is outputting or capable of outputting audio
+// MARK: - Audio App
+
 public struct AudioApp: Identifiable {
-    public let id: UUID = UUID()
+    // STABLE identity — uses the PID so SwiftUI can track across refreshes
+    public let id: Int32
     public let name: String
     public let bundleId: String
     public let pid: Int32
     public var icon: NSImage?
-    public var volume: Double       // 0.0 to 1.0
-    public var isMuted: Bool
-    public var isRecording: Bool
-    public var stereoPosition: Double  // -1.0 (Left) to 1.0 (Right)
-    public var dbLevel: Float       // -60.0 to 0.0
-    public var accentColor: Color
+    public var volume: Double = 0.8
+    public var isMuted: Bool = false
+    public var isRecording: Bool = false
+    public var stereoPosition: Double = 0.0
+    public var dbLevel: Float = -60.0
+    public var accentColor: Color = .accentColor
     public var outputDevice: AudioDevice
-    public var isKnownAudioApp: Bool
-    
-    // Spatial canvas position (set by auto-layout or drag)
-    public var canvasX: Double = 0.5   // 0.0 to 1.0 normalized
-    public var canvasY: Double = 0.3   // 0.0 to 1.0 normalized
+    public var isKnownAudioApp: Bool = false
+    public var canvasX: Double = 0.5
+    public var canvasY: Double = 0.5
     
     public init(name: String, bundleId: String, pid: Int32, icon: NSImage? = nil,
-                volume: Double = 0.8, isMuted: Bool = false, isRecording: Bool = false,
-                stereoPosition: Double = 0.0, dbLevel: Float = -60.0,
-                outputDevice: AudioDevice, canvasX: Double = 0.5, canvasY: Double = 0.3) {
+                volume: Double = 0.8, outputDevice: AudioDevice,
+                canvasX: Double = 0.5, canvasY: Double = 0.5) {
+        self.id = pid  // stable identity
         self.name = name
         self.bundleId = bundleId
         self.pid = pid
         self.icon = icon
         self.volume = volume
-        self.isMuted = isMuted
-        self.isRecording = isRecording
-        self.stereoPosition = stereoPosition
-        self.dbLevel = dbLevel
         self.outputDevice = outputDevice
         self.canvasX = canvasX
         self.canvasY = canvasY
-        self.isKnownAudioApp = knownAudioBundleIds.contains(bundleId) ||
-            knownAudioBundleIds.contains(where: { bundleId.hasPrefix($0) })
+        self.isKnownAudioApp = knownAudioBundlePrefixes.contains(where: { bundleId.hasPrefix($0) })
         
-        // Generate accent color from bundle ID
-        if bundleId.contains("spotify") || bundleId.contains("music") || bundleId.contains("tidal") {
+        // Accent colors
+        let b = bundleId.lowercased()
+        if b.contains("spotify") || b.contains("music") || b.contains("tidal") {
             self.accentColor = Color(red: 0.11, green: 0.73, blue: 0.33)
-        } else if bundleId.contains("zoom") || bundleId.contains("teams") || bundleId.contains("facetime") {
+        } else if b.contains("zoom") || b.contains("teams") || b.contains("facetime") {
             self.accentColor = Color(red: 0.18, green: 0.55, blue: 0.94)
-        } else if bundleId.contains("chrome") || bundleId.contains("brave") {
+        } else if b.contains("chrome") || b.contains("brave") {
             self.accentColor = Color(red: 0.92, green: 0.26, blue: 0.21)
-        } else if bundleId.contains("safari") {
+        } else if b.contains("safari") {
             self.accentColor = Color(red: 0.0, green: 0.48, blue: 1.0)
-        } else if bundleId.contains("discord") {
+        } else if b.contains("discord") {
             self.accentColor = Color(red: 0.35, green: 0.40, blue: 0.93)
-        } else if bundleId.contains("firefox") {
+        } else if b.contains("firefox") {
             self.accentColor = Color(red: 1.0, green: 0.40, blue: 0.0)
-        } else if bundleId.contains("netflix") {
+        } else if b.contains("netflix") {
             self.accentColor = Color(red: 0.90, green: 0.10, blue: 0.10)
-        } else {
-            self.accentColor = Color.accentColor
         }
     }
 }
+
+// MARK: - App State
 
 @MainActor
 public class AppState: ObservableObject {
@@ -101,43 +99,36 @@ public class AppState: ObservableObject {
     @Published var devices: [AudioDevice] = []
     @Published var defaultDevice: AudioDevice?
     @Published var isLoopbackEnabled: Bool = false
-    @Published var showAllApps: Bool = false  // toggle to show/hide non-audio apps
-    
-    private var appCounter: Int = 0  // for circular layout
+    @Published var showAllApps: Bool = true  // default to showing all apps
     
     private init() {
         loadInitialState()
     }
     
     private func loadInitialState() {
-        let fetchedDevices = AudioDeviceManager.shared.fetchOutputDevices()
-        self.devices = fetchedDevices
-        self.defaultDevice = fetchedDevices.first(where: { $0.isDefault }) ?? fetchedDevices.first
+        let fetched = AudioDeviceManager.shared.fetchOutputDevices()
+        self.devices = fetched
+        self.defaultDevice = fetched.first(where: { $0.isDefault }) ?? fetched.first
         
         updateRunningApps()
         
-        // Refresh app list every second
-        Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        // Refresh app list every 2 seconds (slow — just to catch new/closed apps)
+        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in self.updateRunningApps() }
         }
         
-        // Simulate audio level meters
-        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+        // dB meter simulation — purely cosmetic, does NOT affect visibility
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 for i in 0..<self.apps.count {
-                    guard !self.apps[i].isMuted else {
+                    if self.apps[i].isMuted {
                         self.apps[i].dbLevel = -60.0
-                        continue
-                    }
-                    // Known audio apps get realistic activity; others stay quiet
-                    if self.apps[i].isKnownAudioApp {
-                        self.apps[i].dbLevel = Float.random(in: -18.0...(-3.0))
+                    } else if self.apps[i].isKnownAudioApp {
+                        self.apps[i].dbLevel = Float.random(in: -20.0...(-4.0))
                     } else {
-                        // Random occasional "blips" for background apps
-                        let dice = Float.random(in: 0...1)
-                        self.apps[i].dbLevel = dice > 0.85 ? Float.random(in: -40.0...(-20.0)) : -60.0
+                        self.apps[i].dbLevel = Float.random(in: -55.0...(-35.0))
                     }
                 }
             }
@@ -145,103 +136,88 @@ public class AppState: ObservableObject {
     }
     
     private func updateRunningApps() {
-        let workspace = NSWorkspace.shared
-        // Only show regular apps (have Dock icons)
-        let runningApps = workspace.runningApplications.filter {
+        let running = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular &&
+            $0.bundleIdentifier != nil &&
             $0.bundleIdentifier != "com.hassan.AudioMixer"
         }
         
         let defaultOutput = self.defaultDevice ?? AudioDevice(id: "default", name: "System Default")
-        let existingCount = self.apps.count
+        let existingPIDs = Set(self.apps.map { $0.pid })
+        let runningPIDs = Set(running.map { $0.processIdentifier })
         
-        var newApps: [AudioApp] = []
-        for app in runningApps {
-            guard let name = app.localizedName,
-                  let bundleId = app.bundleIdentifier else { continue }
+        // Remove apps that are no longer running
+        var updatedApps = self.apps.filter { runningPIDs.contains($0.pid) }
+        
+        // Add newly launched apps
+        let totalForLayout = running.count
+        for app in running {
+            guard !existingPIDs.contains(app.processIdentifier) else { continue }
+            guard let name = app.localizedName, let bundleId = app.bundleIdentifier else { continue }
             
-            if let existing = self.apps.first(where: { $0.pid == app.processIdentifier }) {
-                newApps.append(existing)
-            } else {
-                // New app: place it at the next circular layout position
-                let (cx, cy) = circularPosition(for: newApps.count + existingCount)
-                let newApp = AudioApp(
-                    name: name, bundleId: bundleId,
-                    pid: app.processIdentifier,
-                    icon: app.icon,
-                    volume: 0.8,
-                    outputDevice: defaultOutput,
-                    canvasX: cx,
-                    canvasY: cy
-                )
-                newApps.append(newApp)
-            }
+            let idx = updatedApps.count
+            let (cx, cy) = Self.circularPosition(for: idx, total: totalForLayout)
+            let newApp = AudioApp(
+                name: name, bundleId: bundleId,
+                pid: app.processIdentifier,
+                icon: app.icon,
+                volume: 0.8,
+                outputDevice: defaultOutput,
+                canvasX: cx, canvasY: cy
+            )
+            updatedApps.append(newApp)
         }
         
-        // Sort: known audio apps first, then alphabetically
-        self.apps = newApps.sorted {
+        // Sort: known audio apps first, then alphabetical
+        updatedApps.sort {
             if $0.isKnownAudioApp != $1.isKnownAudioApp { return $0.isKnownAudioApp }
             return $0.name < $1.name
         }
+        
+        self.apps = updatedApps
     }
     
-    /// Evenly distributes app nodes in a circle around the center of the canvas
-    private func circularPosition(for index: Int) -> (Double, Double) {
-        let total = max(1, NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.count)
-        let angle = (Double(index) / Double(total)) * 2 * .pi - .pi / 2
-        let radius = 0.32  // fraction of canvas
-        let cx = 0.5 + radius * cos(angle)
-        let cy = 0.5 + radius * sin(angle)
-        return (cx, cy)
+    static func circularPosition(for index: Int, total: Int) -> (Double, Double) {
+        let n = max(1, total)
+        let angle = (Double(index) / Double(n)) * 2.0 * .pi - .pi / 2.0
+        let radius = 0.30
+        return (0.5 + radius * cos(angle), 0.5 + radius * sin(angle))
     }
     
-    // MARK: - Public Mutators
+    // MARK: - Mutators
     
     public func setVolume(for app: AudioApp, to volume: Double) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[i].volume = volume
-        }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].volume = volume }
     }
-    
     public func toggleMute(for app: AudioApp) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[i].isMuted.toggle()
-        }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].isMuted.toggle() }
     }
-    
     public func toggleRecording(for app: AudioApp) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[i].isRecording.toggle()
-        }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].isRecording.toggle() }
     }
-    
     public func setOutputDevice(for app: AudioApp, to device: AudioDevice) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[i].outputDevice = device
-        }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].outputDevice = device }
     }
-    
-    public func setStereoPosition(for app: AudioApp, to position: Double) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[i].stereoPosition = position
-        }
+    public func setStereoPosition(for app: AudioApp, to pos: Double) {
+        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].stereoPosition = pos }
     }
-    
     public func setCanvasPosition(for app: AudioApp, x: Double, y: Double) {
         if let i = apps.firstIndex(where: { $0.id == app.id }) {
             apps[i].canvasX = x
             apps[i].canvasY = y
         }
     }
-    
     public func snapToCenter(for app: AudioApp) {
         if let i = apps.firstIndex(where: { $0.id == app.id }) {
             apps[i].stereoPosition = 0.0
             apps[i].volume = 0.8
-            let (cx, cy) = circularPosition(for: i)
+            let (cx, cy) = Self.circularPosition(for: i, total: apps.count)
             apps[i].canvasX = cx
             apps[i].canvasY = cy
         }
+    }
+    public func selectApp(_ app: AudioApp) -> Int32 {
+        return app.id
     }
     
     public func resetToDefaults() {
@@ -252,18 +228,14 @@ public class AppState: ObservableObject {
             apps[i].isMuted = false
             apps[i].stereoPosition = 0.0
             if let dev = defaultDev { apps[i].outputDevice = dev }
-            // Re-layout in circle
-            let angle = (Double(i) / Double(max(1, total))) * 2 * .pi - .pi / 2
-            let radius = 0.32
-            apps[i].canvasX = 0.5 + radius * cos(angle)
-            apps[i].canvasY = 0.5 + radius * sin(angle)
+            let (cx, cy) = Self.circularPosition(for: i, total: total)
+            apps[i].canvasX = cx
+            apps[i].canvasY = cy
         }
     }
     
-    /// Visible apps depending on the showAllApps toggle
     public var visibleApps: [AudioApp] {
         if showAllApps { return apps }
-        // Show known audio apps + apps that are recently active
-        return apps.filter { $0.isKnownAudioApp || $0.dbLevel > -50 }
+        return apps.filter { $0.isKnownAudioApp }
     }
 }

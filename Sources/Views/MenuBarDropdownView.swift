@@ -11,7 +11,7 @@ struct GlassVolumeSlider: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                // Track background
+                // Track
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.primary.opacity(0.07))
                     .overlay(
@@ -19,11 +19,11 @@ struct GlassVolumeSlider: View {
                             .stroke(Color.primary.opacity(isHovering ? 0.15 : 0.07), lineWidth: 0.5)
                     )
                 
-                // dB meter glow (activity indicator)
-                if !app.isMuted && app.dbLevel > -50 {
+                // dB activity glow
+                if !app.isMuted {
                     let lvl = CGFloat(max(0, (app.dbLevel + 60) / 60.0))
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(app.accentColor.opacity(0.18))
+                        .fill(app.accentColor.opacity(0.15))
                         .frame(width: geo.size.width * lvl)
                         .animation(.interactiveSpring(response: 0.12, dampingFraction: 0.7), value: lvl)
                 }
@@ -36,9 +36,9 @@ struct GlassVolumeSlider: View {
                         startPoint: .leading, endPoint: .trailing
                     ))
                     .frame(width: geo.size.width * CGFloat(app.volume))
-                    .shadow(color: app.accentColor.opacity(app.isMuted ? 0 : 0.3), radius: 5, x: 1, y: 0)
+                    .shadow(color: app.accentColor.opacity(app.isMuted ? 0 : 0.25), radius: 4, x: 1, y: 0)
                 
-                // Specular glass shine
+                // Glass shine
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(LinearGradient(
                         colors: [.white.opacity(0.25), .clear, .black.opacity(0.08)],
@@ -49,15 +49,16 @@ struct GlassVolumeSlider: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { g in
                     isDragging = true
-                    let v = max(0, min(1, Double(g.location.x / geo.size.width)))
-                    state.setVolume(for: app, to: v)
+                    state.setVolume(for: app, to: max(0, min(1, Double(g.location.x / geo.size.width))))
                 }
                 .onEnded { _ in withAnimation(.spring(response: 0.3)) { isDragging = false } }
             )
-            .onHover { hovering in withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering } }
+            .onHover { hovering in
+                withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering }
+            }
         }
         .frame(height: 22)
-        .scaleEffect(y: isDragging ? 1.18 : (isHovering ? 1.08 : 1.0))
+        .scaleEffect(y: isDragging ? 1.15 : (isHovering ? 1.06 : 1.0))
         .animation(.spring(response: 0.22, dampingFraction: 0.6), value: isDragging || isHovering)
     }
 }
@@ -73,40 +74,30 @@ public struct MenuBarDropdownView: View {
     public var body: some View {
         VStack(spacing: 10) {
             
-            // MARK: Header
+            // Header
             HStack(spacing: 8) {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
-                
                 Text("Audio Mixer")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
                 
                 Spacer()
                 
-                // Global output device indicator
                 if let dev = state.defaultDevice {
-                    HStack(spacing: 4) {
-                        Image(systemName: outputIcon(dev.name))
-                            .font(.system(size: 9))
-                        Text(dev.shortName)
-                            .font(.system(size: 9, weight: .medium))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    HStack(spacing: 3) {
+                        Image(systemName: outputIcon(dev.name)).font(.system(size: 9))
+                        Text(dev.shortName).font(.system(size: 9, weight: .medium)).lineLimit(1)
                     }
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, 6).padding(.vertical, 3)
                     .background(Color.accentColor.opacity(0.08))
                     .clipShape(Capsule())
                     .foregroundStyle(Color.accentColor)
-                    .frame(maxWidth: 120)
+                    .frame(maxWidth: 110)
                 }
                 
-                // Reset button
                 Button(action: {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                        state.resetToDefaults()
-                    }
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { state.resetToDefaults() }
                 }) {
                     Image(systemName: "arrow.counterclockwise")
                         .font(.system(size: 10, weight: .medium))
@@ -118,62 +109,28 @@ public struct MenuBarDropdownView: View {
                 .buttonStyle(.plain)
                 .help("Reset all to defaults")
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 2)
             
             Divider().opacity(0.4)
             
-            // MARK: Show All Toggle (compact)
-            if !state.showAllApps && state.visibleApps.isEmpty {
-                Button(action: { state.showAllApps = true }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "eye")
-                            .font(.system(size: 10))
-                        Text("No active audio detected — tap to show all apps")
-                            .font(.system(size: 10))
-                    }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.04))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            // Toggle bar
+            HStack {
+                Toggle(isOn: $state.showAllApps) {
+                    Text(state.showAllApps ? "All Apps" : "Audio Apps Only")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 4)
+                .toggleStyle(.checkbox)
+                Spacer()
             }
+            .padding(.horizontal, 4)
             
-            // MARK: App List
+            // App list
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
                     let displayApps = state.showAllApps ? state.apps : state.visibleApps
                     ForEach(displayApps) { app in
-                        appRow(for: app)
-                    }
-                    
-                    // Show all toggle at bottom of list if hidden apps exist
-                    if !state.showAllApps && state.apps.count > state.visibleApps.count {
-                        Button(action: { state.showAllApps.toggle() }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 9))
-                                Text("\(state.apps.count - state.visibleApps.count) more apps hidden")
-                                    .font(.system(size: 10))
-                            }
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.plain)
-                    } else if state.showAllApps && state.apps.count > state.visibleApps.count {
-                        Button(action: { state.showAllApps = false }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "chevron.up")
-                                    .font(.system(size: 9))
-                                Text("Show active only")
-                                    .font(.system(size: 10))
-                            }
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.plain)
+                        appRow(app)
                     }
                 }
                 .padding(.horizontal, 2)
@@ -182,11 +139,10 @@ public struct MenuBarDropdownView: View {
             
             Divider().opacity(0.4)
             
-            // MARK: Bottom Bar
+            // Bottom controls
             VStack(spacing: 8) {
-                // System loopback toggle
                 Toggle(isOn: $state.isLoopbackEnabled) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "record.circle.fill")
                             .font(.system(size: 11))
                             .foregroundStyle(state.isLoopbackEnabled ? .red : .secondary)
@@ -208,13 +164,10 @@ public struct MenuBarDropdownView: View {
                         NSApp.activate(ignoringOtherApps: true)
                     }) {
                         HStack(spacing: 4) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 11))
-                            Text("Spatial Soundstage...")
-                                .font(.system(size: 11, weight: .semibold))
+                            Image(systemName: "sparkles").font(.system(size: 10))
+                            Text("Spatial Soundstage...").font(.system(size: 11, weight: .semibold))
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(Color.accentColor.opacity(0.1))
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .foregroundStyle(Color.accentColor)
@@ -227,7 +180,7 @@ public struct MenuBarDropdownView: View {
                         Image(systemName: "power")
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(Color.red.opacity(0.8))
-                            .padding(6)
+                            .padding(5)
                             .background(Color.red.opacity(0.1))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
@@ -243,7 +196,7 @@ public struct MenuBarDropdownView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(LinearGradient(
-                    colors: [.white.opacity(0.45), .white.opacity(0.08), .clear, .black.opacity(0.15)],
+                    colors: [.white.opacity(0.4), .white.opacity(0.08), .clear, .black.opacity(0.12)],
                     startPoint: .topLeading, endPoint: .bottomTrailing
                 ), lineWidth: 0.8)
         )
@@ -252,30 +205,21 @@ public struct MenuBarDropdownView: View {
     // MARK: - App Row
     
     @ViewBuilder
-    private func appRow(for app: AudioApp) -> some View {
+    private func appRow(_ app: AudioApp) -> some View {
         HStack(spacing: 10) {
-            // App icon
+            // Icon
             ZStack {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(app.accentColor.opacity(0.1))
                     .frame(width: 32, height: 32)
                 if let icon = app.icon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 22, height: 22)
+                    Image(nsImage: icon).resizable().aspectRatio(contentMode: .fit).frame(width: 22, height: 22)
                 } else {
-                    Image(systemName: "app.fill")
-                        .font(.system(size: 14))
-                        .foregroundStyle(app.accentColor)
+                    Image(systemName: "app.fill").font(.system(size: 14)).foregroundStyle(app.accentColor)
                 }
-                
-                // Active audio dot
-                if app.dbLevel > -45 && !app.isMuted {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 6, height: 6)
-                        .offset(x: 12, y: -12)
+                // Active dot
+                if app.isKnownAudioApp && !app.isMuted {
+                    Circle().fill(Color.green).frame(width: 5, height: 5).offset(x: 12, y: -12)
                 }
             }
             
@@ -284,34 +228,25 @@ public struct MenuBarDropdownView: View {
                     Text(app.name)
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .lineLimit(1)
-                    
                     Spacer()
                     
-                    // Per-app output device picker
+                    // Device picker
                     Menu {
                         ForEach(state.devices) { device in
                             Button(action: { state.setOutputDevice(for: app, to: device) }) {
                                 HStack {
                                     Text(device.name)
-                                    if app.outputDevice.id == device.id {
-                                        Image(systemName: "checkmark")
-                                    }
+                                    if app.outputDevice.id == device.id { Image(systemName: "checkmark") }
                                 }
                             }
                         }
                     } label: {
                         HStack(spacing: 2) {
-                            Image(systemName: outputIcon(app.outputDevice.name))
-                                .font(.system(size: 8))
-                            Text(app.outputDevice.shortName)
-                                .font(.system(size: 9, weight: .medium))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.system(size: 7))
+                            Image(systemName: outputIcon(app.outputDevice.name)).font(.system(size: 8))
+                            Text(app.outputDevice.shortName).font(.system(size: 9, weight: .medium)).lineLimit(1)
+                            Image(systemName: "chevron.up.chevron.down").font(.system(size: 7))
                         }
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, 5).padding(.vertical, 2)
                         .background(Color.primary.opacity(0.06))
                         .clipShape(RoundedRectangle(cornerRadius: 5))
                         .foregroundStyle(.secondary)
@@ -350,10 +285,7 @@ public struct MenuBarDropdownView: View {
                 }
             }
         }
-        .padding(.horizontal, 2)
     }
-    
-    // MARK: - Helpers
     
     private func outputIcon(_ name: String) -> String {
         let n = name.lowercased()
