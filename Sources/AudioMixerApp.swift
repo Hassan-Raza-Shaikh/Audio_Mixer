@@ -43,7 +43,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func setupDropdownWindow() {
         // Create a custom borderless panel for the drop-down menu
-        let window = NSWindow(
+        let window = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 400),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -53,8 +53,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
-        window.level = .statusBar
-        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle]
+        window.level = .popUpMenu
+        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
         
         // Host our SwiftUI MenuBarDropdownView
         let contentView = NSHostingView(rootView: MenuBarDropdownView())
