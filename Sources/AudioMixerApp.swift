@@ -20,16 +20,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var dropdownWindow: NSPanel?
     private var appState = AppState.shared
     private var eventMonitor: Any?
-    private var appearanceObservation: NSKeyValueObservation?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupDropdownWindow()
-        
-        // Force Dock icon to update when system appearance changes
-        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.initial, .new]) { _, _ in
-            NSApp.applicationIconImage = NSImage(named: "AppIcon")
-        }
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
