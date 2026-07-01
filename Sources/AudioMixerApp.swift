@@ -15,14 +15,15 @@ struct AudioMixerApp: App {
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
-    private var dropdownWindow: NSWindow?
+    private var popover: NSPopover?
     private var appState = AppState.shared
+    private var eventMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
-        setupDropdownWindow()
+        setupPopover()
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -41,73 +42,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.target = self
     }
     
-    private func setupDropdownWindow() {
-        // Create a custom borderless panel for the drop-down menu
-        let window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 400),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.level = .popUpMenu
-        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
-        
-        // Host our SwiftUI MenuBarDropdownView
-        let contentView = NSHostingView(rootView: MenuBarDropdownView())
-        window.contentView = contentView
-        
-        self.dropdownWindow = window
+    private func setupPopover() {
+        let popover = NSPopover()
+        popover.contentSize = NSSize(width: 360, height: 400)
+        popover.behavior = .transient // Automatically closes when clicking outside
+        popover.contentViewController = NSHostingController(rootView: MenuBarDropdownView())
+        popover.delegate = self
+        self.popover = popover
     }
     
     @objc private func statusBarButtonClicked(_ sender: AnyObject?) {
-        guard let button = statusItem?.button, let window = dropdownWindow else { return }
+        guard let button = statusItem?.button, let popover = popover else { return }
         
-        if window.isVisible {
-            // Dismiss window with a fade-out animation
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
-                window.animator().alphaValue = 0.0
-            } completionHandler: {
-                window.orderOut(nil)
-            }
+        if popover.isShown {
+            popover.performClose(sender)
         } else {
-            // Position the window directly below the menu bar item
-            let buttonFrame = button.window?.convertToScreen(button.frame) ?? .zero
-            let windowFrame = window.frame
+            // Position the popover directly below the menu bar item
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             
-            let xPos = buttonFrame.origin.x + (buttonFrame.size.width / 2) - (windowFrame.size.width / 2)
-            let yPos = buttonFrame.origin.y - windowFrame.size.height - 4 // 4pt gap
-            
-            window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
-            
-            // Fade-in slide down animation
-            window.alphaValue = 0.0
-            window.orderFront(nil)
-            
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().alphaValue = 1.0
-            }
-            
-            // Make key to receive keyboard focus (allows using sliders and hotkeys)
-            window.makeKey()
+            // To ensure it appears over fullscreen apps, bring the app forward
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
     
-    func applicationDidResignActive(_ notification: Notification) {
-        // Automatically hide the menu dropdown when the user clicks away
-        if let window = dropdownWindow, window.isVisible {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
-                window.animator().alphaValue = 0.0
-            } completionHandler: {
-                window.orderOut(nil)
-            }
-        }
+    func popoverWillShow(_ notification: Notification) {
+        // Additional setup if needed before showing
+    }
+    
+    func popoverDidClose(_ notification: Notification) {
+        // Handle cleanup if needed
     }
 }
