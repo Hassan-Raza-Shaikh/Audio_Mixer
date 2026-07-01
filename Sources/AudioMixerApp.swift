@@ -15,19 +15,18 @@ struct AudioMixerApp: App {
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
+    private var dropdownWindow: NSPanel?
     private var appState = AppState.shared
     private var eventMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
-        setupPopover()
+        setupDropdownWindow()
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Keep the app running in the menu bar even when the main window is closed
         return false
     }
     
@@ -36,40 +35,80 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         
         guard let button = statusItem?.button else { return }
         
-        // Use a high-quality native system icon representing sliders/knobs
         button.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "AudioMixer")
         button.action = #selector(statusBarButtonClicked(_:))
         button.target = self
     }
     
-    private func setupPopover() {
-        let popover = NSPopover()
-        popover.contentSize = NSSize(width: 360, height: 400)
-        popover.behavior = .transient // Automatically closes when clicking outside
-        popover.contentViewController = NSHostingController(rootView: MenuBarDropdownView())
-        popover.delegate = self
-        self.popover = popover
+    private func setupDropdownWindow() {
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 400),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = .popUpMenu
+        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
+        
+        let contentView = NSHostingView(rootView: MenuBarDropdownView())
+        window.contentView = contentView
+        
+        self.dropdownWindow = window
     }
     
     @objc private func statusBarButtonClicked(_ sender: AnyObject?) {
-        guard let button = statusItem?.button, let popover = popover else { return }
+        guard let button = statusItem?.button, let window = dropdownWindow else { return }
         
-        if popover.isShown {
-            popover.performClose(sender)
+        if window.isVisible {
+            closeDropdown()
         } else {
-            // Position the popover directly below the menu bar item
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            let buttonFrame = button.window?.convertToScreen(button.frame) ?? .zero
+            let windowFrame = window.frame
             
-            // To ensure it appears over fullscreen apps, bring the app forward
-            NSApp.activate(ignoringOtherApps: true)
+            let xPos = buttonFrame.origin.x + (buttonFrame.size.width / 2) - (windowFrame.size.width / 2)
+            let yPos = buttonFrame.origin.y - windowFrame.size.height - 4
+            
+            window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
+            
+            window.alphaValue = 0.0
+            window.orderFront(nil)
+            
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.22
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                window.animator().alphaValue = 1.0
+            }
+            
+            window.makeKey()
+            
+            // Monitor clicks outside the window to close it (native popover behavior)
+            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                self?.closeDropdown()
+            }
         }
     }
     
-    func popoverWillShow(_ notification: Notification) {
-        // Additional setup if needed before showing
+    private func closeDropdown() {
+        guard let window = dropdownWindow, window.isVisible else { return }
+        
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+        
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            window.animator().alphaValue = 0.0
+        } completionHandler: {
+            window.orderOut(nil)
+        }
     }
     
-    func popoverDidClose(_ notification: Notification) {
-        // Handle cleanup if needed
+    func applicationDidResignActive(_ notification: Notification) {
+        closeDropdown()
     }
 }
