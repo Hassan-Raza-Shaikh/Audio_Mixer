@@ -1,0 +1,50 @@
+# Xcode
+# =========================
+build/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+!default.xcworkspace
+*.xcscheme
+!default.xcscheme
+*.xsanproj
+*.xsanidx
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# XcodeGen
+# =========================
+# We ignore the generated xcodeproj folder as it's fully generated from project.yml
+*.xcodeproj/
+
+# macOS / OS X
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Files that might be created by SpotLight or Finder
+Icon
+.DocumentRevisions-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created by editors
+.xcodeproj/
+.idea/
+*.suo
+*.ntvsca
+*.njsproj
+*.sln
+*.sw?
+
+# Swift Package Manager
+# =========================
+.build/
+.swiftpm/
+Packages/
+Package.pins
+Package.resolved
