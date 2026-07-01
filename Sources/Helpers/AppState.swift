@@ -12,7 +12,26 @@ public struct AudioDevice: Identifiable, Hashable {
         self.name = name
         self.isDefault = isDefault
     }
+    
+    /// Short display name (truncated for compact UI)
+    public var shortName: String {
+        let parts = name.components(separatedBy: " ")
+        if parts.count > 2 { return parts.prefix(2).joined(separator: " ") }
+        return name
+    }
 }
+
+/// Apps that are known to produce audio, shown with priority
+private let knownAudioBundleIds: [String] = [
+    "com.spotify.client", "com.apple.Music", "com.apple.podcasts",
+    "us.zoom.xos", "com.microsoft.teams", "com.microsoft.teams2",
+    "com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox",
+    "com.brave.Browser", "com.microsoft.edgemac",
+    "com.apple.FaceTime", "com.discord.Discord", "com.hnc.Discord",
+    "com.apple.QuickTimePlayerX", "io.mpv", "com.colliderli.iina",
+    "com.apple.TV", "com.apple.music", "com.tidal.desktop",
+    "com.netflix.Netflix", "com.amazon.PrimeVideo"
+]
 
 /// Represents an application that is outputting or capable of outputting audio
 public struct AudioApp: Identifiable {
@@ -20,32 +39,54 @@ public struct AudioApp: Identifiable {
     public let name: String
     public let bundleId: String
     public let pid: Int32
-    public var volume: Double // 0.0 to 1.0
+    public var icon: NSImage?
+    public var volume: Double       // 0.0 to 1.0
     public var isMuted: Bool
     public var isRecording: Bool
-    public var pan: Double // -1.0 (Left) to 1.0 (Right)
-    public var dbLevel: Float // -60.0 to 0.0
+    public var stereoPosition: Double  // -1.0 (Left) to 1.0 (Right)
+    public var dbLevel: Float       // -60.0 to 0.0
     public var accentColor: Color
     public var outputDevice: AudioDevice
+    public var isKnownAudioApp: Bool
     
-    public init(name: String, bundleId: String, pid: Int32, volume: Double = 0.8, isMuted: Bool = false, isRecording: Bool = false, pan: Double = 0.0, dbLevel: Float = -60.0, outputDevice: AudioDevice) {
+    // Spatial canvas position (set by auto-layout or drag)
+    public var canvasX: Double = 0.5   // 0.0 to 1.0 normalized
+    public var canvasY: Double = 0.3   // 0.0 to 1.0 normalized
+    
+    public init(name: String, bundleId: String, pid: Int32, icon: NSImage? = nil,
+                volume: Double = 0.8, isMuted: Bool = false, isRecording: Bool = false,
+                stereoPosition: Double = 0.0, dbLevel: Float = -60.0,
+                outputDevice: AudioDevice, canvasX: Double = 0.5, canvasY: Double = 0.3) {
         self.name = name
         self.bundleId = bundleId
         self.pid = pid
+        self.icon = icon
         self.volume = volume
         self.isMuted = isMuted
         self.isRecording = isRecording
-        self.pan = pan
+        self.stereoPosition = stereoPosition
         self.dbLevel = dbLevel
         self.outputDevice = outputDevice
+        self.canvasX = canvasX
+        self.canvasY = canvasY
+        self.isKnownAudioApp = knownAudioBundleIds.contains(bundleId) ||
+            knownAudioBundleIds.contains(where: { bundleId.hasPrefix($0) })
         
-        // Generate an accent color based on the app's bundle ID/name
-        if bundleId.contains("spotify") {
-            self.accentColor = Color(red: 0.11, green: 0.73, blue: 0.33) // Spotify Green
-        } else if bundleId.contains("zoom") || bundleId.contains("teams") {
-            self.accentColor = Color(red: 0.18, green: 0.55, blue: 0.94) // Zoom Blue
-        } else if bundleId.contains("safari") || bundleId.contains("chrome") {
-            self.accentColor = Color(red: 0.92, green: 0.26, blue: 0.21) // Browser Red/Orange
+        // Generate accent color from bundle ID
+        if bundleId.contains("spotify") || bundleId.contains("music") || bundleId.contains("tidal") {
+            self.accentColor = Color(red: 0.11, green: 0.73, blue: 0.33)
+        } else if bundleId.contains("zoom") || bundleId.contains("teams") || bundleId.contains("facetime") {
+            self.accentColor = Color(red: 0.18, green: 0.55, blue: 0.94)
+        } else if bundleId.contains("chrome") || bundleId.contains("brave") {
+            self.accentColor = Color(red: 0.92, green: 0.26, blue: 0.21)
+        } else if bundleId.contains("safari") {
+            self.accentColor = Color(red: 0.0, green: 0.48, blue: 1.0)
+        } else if bundleId.contains("discord") {
+            self.accentColor = Color(red: 0.35, green: 0.40, blue: 0.93)
+        } else if bundleId.contains("firefox") {
+            self.accentColor = Color(red: 1.0, green: 0.40, blue: 0.0)
+        } else if bundleId.contains("netflix") {
+            self.accentColor = Color(red: 0.90, green: 0.10, blue: 0.10)
         } else {
             self.accentColor = Color.accentColor
         }
@@ -59,86 +100,170 @@ public class AppState: ObservableObject {
     @Published var apps: [AudioApp] = []
     @Published var devices: [AudioDevice] = []
     @Published var defaultDevice: AudioDevice?
-    
     @Published var isLoopbackEnabled: Bool = false
-    @Published var isAccessoryMode: Bool = true {
-        didSet {
-            toggleActivationPolicy()
-        }
-    }
+    @Published var showAllApps: Bool = false  // toggle to show/hide non-audio apps
+    
+    private var appCounter: Int = 0  // for circular layout
     
     private init() {
-        loadMockData()
+        loadInitialState()
     }
     
-    private func loadMockData() {
-        let headphones = AudioDevice(id: "dev_headphones", name: "Sony WH-1000XM4 (Bluetooth)", isDefault: false)
-        let speakers = AudioDevice(id: "dev_speakers", name: "MacBook Pro Speakers (Built-in)", isDefault: true)
-        let externalMonitor = AudioDevice(id: "dev_hdmi", name: "Studio Display (HDMI)", isDefault: false)
+    private func loadInitialState() {
+        let fetchedDevices = AudioDeviceManager.shared.fetchOutputDevices()
+        self.devices = fetchedDevices
+        self.defaultDevice = fetchedDevices.first(where: { $0.isDefault }) ?? fetchedDevices.first
         
-        self.devices = [speakers, headphones, externalMonitor]
-        self.defaultDevice = speakers
+        updateRunningApps()
         
-        self.apps = [
-            AudioApp(name: "Spotify", bundleId: "com.spotify.client", pid: 101, volume: 0.75, outputDevice: headphones),
-            AudioApp(name: "Zoom Meeting", bundleId: "us.zoom.xos", pid: 102, volume: 0.90, outputDevice: speakers),
-            AudioApp(name: "Safari", bundleId: "com.apple.Safari", pid: 103, volume: 0.50, outputDevice: speakers),
-            AudioApp(name: "Discord", bundleId: "com.hnc.Discord", pid: 104, volume: 0.85, outputDevice: headphones)
-        ]
+        // Refresh app list every second
+        Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.updateRunningApps() }
+        }
         
-        // Start a mock meter updates timer to make visualizers feel "alive"
-        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
+        // Simulate audio level meters
+        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
                 for i in 0..<self.apps.count {
-                    if !self.apps[i].isMuted {
-                        // Generate dynamic meter values
-                        let noise = Float.random(in: -30.0...(-5.0))
-                        self.apps[i].dbLevel = noise
-                    } else {
+                    guard !self.apps[i].isMuted else {
                         self.apps[i].dbLevel = -60.0
+                        continue
+                    }
+                    // Known audio apps get realistic activity; others stay quiet
+                    if self.apps[i].isKnownAudioApp {
+                        self.apps[i].dbLevel = Float.random(in: -18.0...(-3.0))
+                    } else {
+                        // Random occasional "blips" for background apps
+                        let dice = Float.random(in: 0...1)
+                        self.apps[i].dbLevel = dice > 0.85 ? Float.random(in: -40.0...(-20.0)) : -60.0
                     }
                 }
             }
         }
     }
     
+    private func updateRunningApps() {
+        let workspace = NSWorkspace.shared
+        // Only show regular apps (have Dock icons)
+        let runningApps = workspace.runningApplications.filter {
+            $0.activationPolicy == .regular &&
+            $0.bundleIdentifier != "com.hassan.AudioMixer"
+        }
+        
+        let defaultOutput = self.defaultDevice ?? AudioDevice(id: "default", name: "System Default")
+        let existingCount = self.apps.count
+        
+        var newApps: [AudioApp] = []
+        for app in runningApps {
+            guard let name = app.localizedName,
+                  let bundleId = app.bundleIdentifier else { continue }
+            
+            if let existing = self.apps.first(where: { $0.pid == app.processIdentifier }) {
+                newApps.append(existing)
+            } else {
+                // New app: place it at the next circular layout position
+                let (cx, cy) = circularPosition(for: newApps.count + existingCount)
+                let newApp = AudioApp(
+                    name: name, bundleId: bundleId,
+                    pid: app.processIdentifier,
+                    icon: app.icon,
+                    volume: 0.8,
+                    outputDevice: defaultOutput,
+                    canvasX: cx,
+                    canvasY: cy
+                )
+                newApps.append(newApp)
+            }
+        }
+        
+        // Sort: known audio apps first, then alphabetically
+        self.apps = newApps.sorted {
+            if $0.isKnownAudioApp != $1.isKnownAudioApp { return $0.isKnownAudioApp }
+            return $0.name < $1.name
+        }
+    }
+    
+    /// Evenly distributes app nodes in a circle around the center of the canvas
+    private func circularPosition(for index: Int) -> (Double, Double) {
+        let total = max(1, NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.count)
+        let angle = (Double(index) / Double(total)) * 2 * .pi - .pi / 2
+        let radius = 0.32  // fraction of canvas
+        let cx = 0.5 + radius * cos(angle)
+        let cy = 0.5 + radius * sin(angle)
+        return (cx, cy)
+    }
+    
+    // MARK: - Public Mutators
+    
     public func setVolume(for app: AudioApp, to volume: Double) {
-        if let index = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[index].volume = volume
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].volume = volume
         }
     }
     
     public func toggleMute(for app: AudioApp) {
-        if let index = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[index].isMuted.toggle()
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].isMuted.toggle()
         }
     }
     
     public func toggleRecording(for app: AudioApp) {
-        if let index = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[index].isRecording.toggle()
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].isRecording.toggle()
         }
     }
     
     public func setOutputDevice(for app: AudioApp, to device: AudioDevice) {
-        if let index = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[index].outputDevice = device
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].outputDevice = device
         }
     }
     
-    public func setPan(for app: AudioApp, to pan: Double) {
-        if let index = apps.firstIndex(where: { $0.id == app.id }) {
-            apps[index].pan = pan
+    public func setStereoPosition(for app: AudioApp, to position: Double) {
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].stereoPosition = position
         }
     }
     
-    private func toggleActivationPolicy() {
-        if isAccessoryMode {
-            NSApp.setActivationPolicy(.accessory)
-        } else {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
+    public func setCanvasPosition(for app: AudioApp, x: Double, y: Double) {
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].canvasX = x
+            apps[i].canvasY = y
         }
+    }
+    
+    public func snapToCenter(for app: AudioApp) {
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            apps[i].stereoPosition = 0.0
+            apps[i].volume = 0.8
+            let (cx, cy) = circularPosition(for: i)
+            apps[i].canvasX = cx
+            apps[i].canvasY = cy
+        }
+    }
+    
+    public func resetToDefaults() {
+        let defaultDev = defaultDevice ?? devices.first
+        let total = apps.count
+        for i in 0..<apps.count {
+            apps[i].volume = 0.8
+            apps[i].isMuted = false
+            apps[i].stereoPosition = 0.0
+            if let dev = defaultDev { apps[i].outputDevice = dev }
+            // Re-layout in circle
+            let angle = (Double(i) / Double(max(1, total))) * 2 * .pi - .pi / 2
+            let radius = 0.32
+            apps[i].canvasX = 0.5 + radius * cos(angle)
+            apps[i].canvasY = 0.5 + radius * sin(angle)
+        }
+    }
+    
+    /// Visible apps depending on the showAllApps toggle
+    public var visibleApps: [AudioApp] {
+        if showAllApps { return apps }
+        // Show known audio apps + apps that are recently active
+        return apps.filter { $0.isKnownAudioApp || $0.dbLevel > -50 }
     }
 }

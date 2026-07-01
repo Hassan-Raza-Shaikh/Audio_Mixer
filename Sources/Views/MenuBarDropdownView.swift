@@ -1,250 +1,194 @@
 import SwiftUI
 
-/// A premium glassmorphic slider that represents both volume level and real-time audio levels
+// MARK: - Glass Volume Slider
+
 struct GlassVolumeSlider: View {
     let app: AudioApp
     @ObservedObject var state = AppState.shared
-    
     @State private var isDragging = false
     @State private var isHovering = false
     
     var body: some View {
-        VParallaxSlider(
-            value: Binding(
-                get: { app.volume },
-                set: { state.setVolume(for: app, to: $0) }
-            ),
-            accentColor: app.accentColor,
-            dbLevel: app.dbLevel,
-            isMuted: app.isMuted,
-            isDragging: $isDragging,
-            isHovering: $isHovering
-        )
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                // Track background
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.primary.opacity(isHovering ? 0.15 : 0.07), lineWidth: 0.5)
+                    )
+                
+                // dB meter glow (activity indicator)
+                if !app.isMuted && app.dbLevel > -50 {
+                    let lvl = CGFloat(max(0, (app.dbLevel + 60) / 60.0))
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(app.accentColor.opacity(0.18))
+                        .frame(width: geo.size.width * lvl)
+                        .animation(.interactiveSpring(response: 0.12, dampingFraction: 0.7), value: lvl)
+                }
+                
+                // Volume fill
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [app.accentColor.opacity(app.isMuted ? 0.25 : 0.85),
+                                 app.accentColor.opacity(app.isMuted ? 0.1 : 0.45)],
+                        startPoint: .leading, endPoint: .trailing
+                    ))
+                    .frame(width: geo.size.width * CGFloat(app.volume))
+                    .shadow(color: app.accentColor.opacity(app.isMuted ? 0 : 0.3), radius: 5, x: 1, y: 0)
+                
+                // Specular glass shine
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(LinearGradient(
+                        colors: [.white.opacity(0.25), .clear, .black.opacity(0.08)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ), lineWidth: 0.8)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    isDragging = true
+                    let v = max(0, min(1, Double(g.location.x / geo.size.width)))
+                    state.setVolume(for: app, to: v)
+                }
+                .onEnded { _ in withAnimation(.spring(response: 0.3)) { isDragging = false } }
+            )
+            .onHover { hovering in withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering } }
+        }
+        .frame(height: 22)
+        .scaleEffect(y: isDragging ? 1.18 : (isHovering ? 1.08 : 1.0))
+        .animation(.spring(response: 0.22, dampingFraction: 0.6), value: isDragging || isHovering)
     }
 }
 
-/// Custom interactive spring slider with audio meter visualizer overlay
-struct VParallaxSlider: View {
-    @Binding var value: Double
-    let accentColor: Color
-    let dbLevel: Float
-    let isMuted: Bool
-    @Binding var isDragging: Bool
-    @Binding var isHovering: Bool
-    
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                // Background Track with Backdrop Blur
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-                    .background(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.primary.opacity(isHovering || isDragging ? 0.15 : 0.08), lineWidth: 0.5)
-                    )
-                
-                // Real-time Decibel Audio Flow meter (underlay glow)
-                if !isMuted {
-                    let normalizedLevel = CGFloat(max(0, (dbLevel + 60) / 60.0)) // Map -60..0 to 0..1
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [accentColor.opacity(0.15), accentColor.opacity(0.02)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: geometry.size.width * normalizedLevel)
-                        .animation(.interactiveSpring(response: 0.15, dampingFraction: 0.65), value: normalizedLevel)
-                }
-                
-                // Volume Level Filled Track
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [accentColor.opacity(isMuted ? 0.3 : 0.8), accentColor.opacity(isMuted ? 0.15 : 0.5)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: geometry.size.width * CGFloat(value))
-                    .shadow(color: accentColor.opacity(isMuted ? 0 : 0.25), radius: 6, x: 2, y: 0)
-                
-                // Specular Light Overlay for Glass Effect
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [.white.opacity(0.3), .clear, .black.opacity(0.1)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1.0
-                    )
-            }
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        isDragging = true
-                        let rawLocation = gesture.location.x
-                        let relativeLocation = max(0, min(1, rawLocation / geometry.size.width))
-                        value = Double(relativeLocation)
-                    }
-                    .onEnded { _ in
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                            isDragging = false
-                        }
-                    }
-            )
-            .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.2)) {
-                    isHovering = hovering
-                }
-            }
-        }
-        .frame(height: 24)
-        .scaleEffect(y: isDragging ? 1.15 : (isHovering ? 1.08 : 1.0))
-        .animation(.spring(response: 0.25, dampingFraction: 0.6), value: isDragging || isHovering)
-    }
-}
+// MARK: - Menu Bar Dropdown
 
 public struct MenuBarDropdownView: View {
     @ObservedObject var state = AppState.shared
+    @Environment(\.openWindow) private var openWindow
     
     public init() {}
     
     public var body: some View {
-        VStack(spacing: 12) {
-            // Header with App Title & Global Quick Controls
-            HStack {
-                Text("AudioMixer")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
+        VStack(spacing: 10) {
+            
+            // MARK: Header
+            HStack(spacing: 8) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                
+                Text("Audio Mixer")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
                 
                 Spacer()
                 
-                // Quick global output indicator
-                if let defDev = state.defaultDevice {
+                // Global output device indicator
+                if let dev = state.defaultDevice {
                     HStack(spacing: 4) {
-                        Image(systemName: "speaker.wave.2.bubble")
-                            .font(.system(size: 10))
-                        Text(defDev.name)
-                            .font(.system(size: 10, weight: .medium))
+                        Image(systemName: outputIcon(dev.name))
+                            .font(.system(size: 9))
+                        Text(dev.shortName)
+                            .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.05))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.08))
                     .clipShape(Capsule())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(maxWidth: 120)
                 }
+                
+                // Reset button
+                Button(action: {
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                        state.resetToDefaults()
+                    }
+                }) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(5)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Reset all to defaults")
             }
             .padding(.horizontal, 4)
             
-            Divider()
-                .opacity(0.5)
+            Divider().opacity(0.4)
             
-            // App-specific mixers list
-            VStack(spacing: 14) {
-                ForEach(state.apps) { app in
-                    HStack(spacing: 10) {
-                        // App Icon (Placeholder using system images with active-color backgrounds)
-                        ZStack {
-                            Circle()
-                                .fill(app.accentColor.opacity(0.12))
-                                .frame(width: 32, height: 32)
-                            
-                            Image(systemName: app.name == "Spotify" ? "music.note" :
-                                    (app.name.contains("Zoom") ? "video.fill" :
-                                    (app.name == "Safari" ? "safari.fill" : "app.badge")))
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(app.accentColor)
-                        }
-                        
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack {
-                                Text(app.name)
-                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                
-                                Spacer()
-                                
-                                // Direct routing menu button
-                                Menu {
-                                    ForEach(state.devices) { device in
-                                        Button(action: {
-                                            state.setOutputDevice(for: app, to: device)
-                                        }) {
-                                            HStack {
-                                                Text(device.name)
-                                                if app.outputDevice.id == device.id {
-                                                    Image(systemName: "checkmark")
-                                                }
-                                            }
-                                        }
-                                    }
-                                } label: {
-                                    HStack(spacing: 3) {
-                                        Text(app.outputDevice.name.components(separatedBy: " ").first ?? "Output")
-                                        Image(systemName: "chevron.up.chevron.down")
-                                            .font(.system(size: 8))
-                                    }
-                                    .font(.system(size: 10, weight: .regular))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(Color.primary.opacity(0.06))
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            
-                            HStack(spacing: 8) {
-                                // Glass Slider with Meter
-                                GlassVolumeSlider(app: app)
-                                
-                                // Volume level percentage text
-                                Text("\(Int(app.volume * 100))%")
-                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 30, alignment: .trailing)
-                                
-                                // Quick Actions: Mute & Record
-                                Button(action: { state.toggleMute(for: app) }) {
-                                    Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(app.isMuted ? Color.red : Color.secondary)
-                                        .frame(width: 18, height: 18)
-                                        .background(Color.primary.opacity(app.isMuted ? 0.1 : 0.04))
-                                        .clipShape(Circle())
-                                }
-                                .buttonStyle(.plain)
-                                
-                                Button(action: { state.toggleRecording(for: app) }) {
-                                    Image(systemName: "record.circle")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(app.isRecording ? Color.red : Color.secondary)
-                                        .frame(width: 18, height: 18)
-                                        .background(Color.primary.opacity(app.isRecording ? 0.1 : 0.04))
-                                        .clipShape(Circle())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
+            // MARK: Show All Toggle (compact)
+            if !state.showAllApps && state.visibleApps.isEmpty {
+                Button(action: { state.showAllApps = true }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 10))
+                        Text("No active audio detected — tap to show all apps")
+                            .font(.system(size: 10))
                     }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 4)
             }
             
-            Divider()
-                .opacity(0.5)
-                .padding(.top, 4)
+            // MARK: App List
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 12) {
+                    let displayApps = state.showAllApps ? state.apps : state.visibleApps
+                    ForEach(displayApps) { app in
+                        appRow(for: app)
+                    }
+                    
+                    // Show all toggle at bottom of list if hidden apps exist
+                    if !state.showAllApps && state.apps.count > state.visibleApps.count {
+                        Button(action: { state.showAllApps.toggle() }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 9))
+                                Text("\(state.apps.count - state.visibleApps.count) more apps hidden")
+                                    .font(.system(size: 10))
+                            }
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.plain)
+                    } else if state.showAllApps && state.apps.count > state.visibleApps.count {
+                        Button(action: { state.showAllApps = false }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.up")
+                                    .font(.system(size: 9))
+                                Text("Show active only")
+                                    .font(.system(size: 10))
+                            }
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .frame(maxHeight: 300)
             
-            // Bottom Bar: System Loopback & Configuration toggles
+            Divider().opacity(0.4)
+            
+            // MARK: Bottom Bar
             VStack(spacing: 8) {
-                // Screen Recording loopback toggle
+                // System loopback toggle
                 Toggle(isOn: $state.isLoopbackEnabled) {
                     HStack(spacing: 6) {
                         Image(systemName: "record.circle.fill")
-                            .font(.system(size: 12))
+                            .font(.system(size: 11))
                             .foregroundStyle(state.isLoopbackEnabled ? .red : .secondary)
                         VStack(alignment: .leading, spacing: 1) {
                             Text("System Audio Loopback")
@@ -256,27 +200,12 @@ public struct MenuBarDropdownView: View {
                     }
                 }
                 .toggleStyle(SwitchToggleStyle(tint: .red))
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 2)
                 
                 HStack {
-                    // Open spatial soundstage window
                     Button(action: {
-                        state.isAccessoryMode = false
-                        // Open window logic
-                        if let window = NSApplication.shared.windows.first(where: { $0.title == "AudioMixer Spatial Studio" }) {
-                            window.makeKeyAndOrderFront(nil)
-                        } else {
-                            // Present spatial window
-                            let spatialWindow = NSWindow(
-                                contentRect: NSRect(x: 0, y: 0, width: 600, height: 450),
-                                styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
-                                backing: .buffered, defer: false)
-                            spatialWindow.title = "AudioMixer Spatial Studio"
-                            spatialWindow.contentView = NSHostingView(rootView: MainWindowView())
-                            spatialWindow.center()
-                            spatialWindow.isReleasedWhenClosed = false
-                            spatialWindow.makeKeyAndOrderFront(nil)
-                        }
+                        openWindow(id: "spatial-studio")
+                        NSApp.activate(ignoringOtherApps: true)
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "sparkles")
@@ -294,29 +223,145 @@ public struct MenuBarDropdownView: View {
                     
                     Spacer()
                     
-                    // Toggle App Mode (Dock/Menu bar)
-                    Button(action: {
-                        state.isAccessoryMode.toggle()
-                    }) {
-                        Image(systemName: state.isAccessoryMode ? "macpro.gen3.fill" : "sidebar.squares.leading")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                    Button(action: { NSApplication.shared.terminate(nil) }) {
+                        Image(systemName: "power")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.red.opacity(0.8))
                             .padding(6)
-                            .background(Color.primary.opacity(0.05))
+                            .background(Color.red.opacity(0.1))
                             .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .help(state.isAccessoryMode ? "Show in Dock" : "Hide in Dock")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Quit Audio Mixer")
+                }
+            }
+        }
+        .padding(14)
+        .frame(width: 360)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(LinearGradient(
+                    colors: [.white.opacity(0.45), .white.opacity(0.08), .clear, .black.opacity(0.15)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                ), lineWidth: 0.8)
+        )
+    }
+    
+    // MARK: - App Row
+    
+    @ViewBuilder
+    private func appRow(for app: AudioApp) -> some View {
+        HStack(spacing: 10) {
+            // App icon
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(app.accentColor.opacity(0.1))
+                    .frame(width: 32, height: 32)
+                if let icon = app.icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 22, height: 22)
+                } else {
+                    Image(systemName: "app.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(app.accentColor)
+                }
+                
+                // Active audio dot
+                if app.dbLevel > -45 && !app.isMuted {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                        .offset(x: 12, y: -12)
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4) {
+                    Text(app.name)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    // Per-app output device picker
+                    Menu {
+                        ForEach(state.devices) { device in
+                            Button(action: { state.setOutputDevice(for: app, to: device) }) {
+                                HStack {
+                                    Text(device.name)
+                                    if app.outputDevice.id == device.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: outputIcon(app.outputDevice.name))
+                                .font(.system(size: 8))
+                            Text(app.outputDevice.shortName)
+                                .font(.system(size: 9, weight: .medium))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 7))
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 90)
                     }
                     .buttonStyle(.plain)
                 }
-                .padding(.top, 4)
+                
+                HStack(spacing: 6) {
+                    GlassVolumeSlider(app: app)
+                    
+                    Text("\(Int(app.volume * 100))%")
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                    
+                    Button(action: { state.toggleMute(for: app) }) {
+                        Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(app.isMuted ? Color.red : Color.secondary)
+                            .frame(width: 18, height: 18)
+                            .background(Color.primary.opacity(app.isMuted ? 0.1 : 0.04))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: { state.toggleRecording(for: app) }) {
+                        Image(systemName: app.isRecording ? "stop.circle.fill" : "record.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(app.isRecording ? Color.red : Color.secondary)
+                            .frame(width: 18, height: 18)
+                            .background(Color.primary.opacity(app.isRecording ? 0.1 : 0.04))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
-        .padding(16)
-        .frame(width: 360)
-        .background(.ultraThinMaterial)
+        .padding(.horizontal, 2)
+    }
+    
+    // MARK: - Helpers
+    
+    private func outputIcon(_ name: String) -> String {
+        let n = name.lowercased()
+        if n.contains("airpod") || n.contains("headphone") { return "airpodspro" }
+        if n.contains("speaker") { return "hifispeaker.fill" }
+        if n.contains("hdmi") || n.contains("display") { return "display" }
+        return "speaker.wave.2.fill"
     }
 }
 
-#Preview {
-    MenuBarDropdownView()
-}
+#Preview { MenuBarDropdownView() }

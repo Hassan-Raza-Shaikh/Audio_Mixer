@@ -6,12 +6,11 @@ struct AudioMixerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     var body: some Scene {
-        // We do not declare a WindowGroup here because we manage all windows manually.
-        // This prevents macOS from launching an empty window when the application starts
-        // and gives us total control over the accessory/menu-bar only launch behavior.
-        Settings {
-            EmptyView()
+        WindowGroup("AudioMixer Spatial Studio", id: "spatial-studio") {
+            MainWindowView()
+                .frame(minWidth: 600, minHeight: 450)
         }
+        .windowResizability(.contentSize)
     }
 }
 
@@ -22,11 +21,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var appState = AppState.shared
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Set application activation policy based on preferences
-        NSApp.setActivationPolicy(appState.isAccessoryMode ? .accessory : .regular)
-        
         setupStatusItem()
         setupDropdownWindow()
+    }
+    
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Keep the app running in the menu bar even when the main window is closed
+        return false
     }
     
     private func setupStatusItem() {
