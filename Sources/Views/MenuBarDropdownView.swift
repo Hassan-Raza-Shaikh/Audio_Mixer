@@ -28,22 +28,36 @@ struct GlassVolumeSlider: View {
                         .animation(.interactiveSpring(response: 0.12, dampingFraction: 0.7), value: lvl)
                 }
                 
-                // Volume fill
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(LinearGradient(
-                        colors: [app.accentColor.opacity(app.isMuted ? 0.25 : 0.85),
-                                 app.accentColor.opacity(app.isMuted ? 0.1 : 0.45)],
-                        startPoint: .leading, endPoint: .trailing
-                    ))
+                // Mesh Gradient Volume fill
+                if !app.isMuted {
+                    MeshGradient(
+                        width: 3, height: 3,
+                        points: [
+                            [0.0, 0.0], [0.5, 0.0], [1.0, 0.0],
+                            [0.0, 0.5], [0.5, 0.5], [1.0, 0.5],
+                            [0.0, 1.0], [0.5, 1.0], [1.0, 1.0]
+                        ],
+                        colors: [
+                            app.accentColor.opacity(0.8), app.accentColor.opacity(0.5), app.accentColor.opacity(0.8),
+                            app.accentColor.opacity(0.5), app.accentColor, app.accentColor.opacity(0.5),
+                            app.accentColor.opacity(0.8), app.accentColor.opacity(0.5), app.accentColor.opacity(0.8)
+                        ]
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .frame(width: geo.size.width * CGFloat(app.volume))
-                    .shadow(color: app.accentColor.opacity(app.isMuted ? 0 : 0.25), radius: 4, x: 1, y: 0)
+                    .shadow(color: app.accentColor.opacity(0.25), radius: 4, x: 1, y: 0)
+                } else {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.1))
+                        .frame(width: geo.size.width * CGFloat(app.volume))
+                }
                 
                 // Glass shine
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(LinearGradient(
-                        colors: [.white.opacity(0.25), .clear, .black.opacity(0.08)],
+                        colors: [.white.opacity(0.3), .clear, .white.opacity(0.05)],
                         startPoint: .topLeading, endPoint: .bottomTrailing
-                    ), lineWidth: 0.8)
+                    ), lineWidth: 0.5)
             }
             .contentShape(Rectangle())
             .gesture(DragGesture(minimumDistance: 0)
@@ -51,15 +65,15 @@ struct GlassVolumeSlider: View {
                     isDragging = true
                     state.setVolume(for: app, to: max(0, min(1, Double(g.location.x / geo.size.width))))
                 }
-                .onEnded { _ in withAnimation(.spring(response: 0.3)) { isDragging = false } }
+                .onEnded { _ in withAnimation(.bouncy(duration: 0.4, extraBounce: 0.1)) { isDragging = false } }
             )
             .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.15)) { isHovering = hovering }
+                withAnimation(.easeOut(duration: 0.2)) { isHovering = hovering }
             }
         }
         .frame(height: 22)
         .scaleEffect(y: isDragging ? 1.15 : (isHovering ? 1.06 : 1.0))
-        .animation(.spring(response: 0.22, dampingFraction: 0.6), value: isDragging || isHovering)
+        .animation(.bouncy(duration: 0.3, extraBounce: 0.2), value: isDragging || isHovering)
     }
 }
 
@@ -127,13 +141,20 @@ public struct MenuBarDropdownView: View {
             
             // App list
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 10) {
+                VStack(spacing: 12) {
                     let displayApps = state.showAllApps ? state.apps : state.visibleApps
                     ForEach(displayApps) { app in
                         appRow(app)
+                            .scrollTransition(.animated.threshold(.visible(0.9))) { content, phase in
+                                content
+                                    .opacity(phase.isIdentity ? 1 : 0.4)
+                                    .scaleEffect(phase.isIdentity ? 1 : 0.95)
+                                    .blur(radius: phase.isIdentity ? 0 : 2)
+                            }
                     }
                 }
                 .padding(.horizontal, 2)
+                .padding(.vertical, 4)
             }
             .frame(maxHeight: 300)
             
@@ -191,15 +212,8 @@ public struct MenuBarDropdownView: View {
         }
         .padding(14)
         .frame(width: 360)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(LinearGradient(
-                    colors: [.white.opacity(0.4), .white.opacity(0.08), .clear, .black.opacity(0.12)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                ), lineWidth: 0.8)
-        )
+        // Removed custom ultraThinMaterial background to allow the NSVisualEffectView popover to render correctly.
+        .background(Color.clear)
     }
     
     // MARK: - App Row
@@ -233,7 +247,9 @@ public struct MenuBarDropdownView: View {
                     // Device picker
                     Menu {
                         ForEach(state.devices) { device in
-                            Button(action: { state.setOutputDevice(for: app, to: device) }) {
+                            Button(action: { 
+                                withAnimation(.bouncy) { state.setOutputDevice(for: app, to: device) }
+                            }) {
                                 HStack {
                                     Text(device.name)
                                     if app.outputDevice.id == device.id { Image(systemName: "checkmark") }
@@ -263,23 +279,29 @@ public struct MenuBarDropdownView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 28, alignment: .trailing)
                     
-                    Button(action: { state.toggleMute(for: app) }) {
+                    Button(action: { 
+                        withAnimation(.bouncy(duration: 0.4)) { state.toggleMute(for: app) }
+                    }) {
                         Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 10))
                             .foregroundStyle(app.isMuted ? Color.red : Color.secondary)
                             .frame(width: 18, height: 18)
                             .background(Color.primary.opacity(app.isMuted ? 0.1 : 0.04))
                             .clipShape(Circle())
+                            .scaleEffect(app.isMuted ? 0.9 : 1.0)
                     }
                     .buttonStyle(.plain)
                     
-                    Button(action: { state.toggleRecording(for: app) }) {
+                    Button(action: { 
+                        withAnimation(.bouncy(duration: 0.4)) { state.toggleRecording(for: app) }
+                    }) {
                         Image(systemName: app.isRecording ? "stop.circle.fill" : "record.circle")
                             .font(.system(size: 10))
                             .foregroundStyle(app.isRecording ? Color.red : Color.secondary)
                             .frame(width: 18, height: 18)
                             .background(Color.primary.opacity(app.isRecording ? 0.1 : 0.04))
                             .clipShape(Circle())
+                            .scaleEffect(app.isRecording ? 1.1 : 1.0)
                     }
                     .buttonStyle(.plain)
                 }

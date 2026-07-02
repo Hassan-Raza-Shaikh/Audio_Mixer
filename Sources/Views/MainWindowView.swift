@@ -22,28 +22,51 @@ struct AppNodeView: View {
                 // Pulse ring for active audio apps
                 if isActive {
                     Circle()
-                        .stroke(app.accentColor.opacity(0.25), lineWidth: 2)
-                        .frame(width: 54, height: 54)
-                        .scaleEffect(1.08)
+                        .stroke(app.accentColor.opacity(0.3), lineWidth: 2)
+                        .frame(width: 56, height: 56)
+                        .scaleEffect(1.05)
+                        .animation(.bouncy.repeatForever(autoreverses: true), value: isActive)
                 }
                 
                 // Selection ring
                 if isSelected {
                     Circle()
-                        .stroke(Color.white.opacity(0.8), lineWidth: 2.5)
-                        .frame(width: 52, height: 52)
+                        .stroke(Color.white.opacity(0.9), lineWidth: 3)
+                        .frame(width: 54, height: 54)
                 }
                 
-                // Glow
+                // Glass puck background
                 Circle()
-                    .fill(app.accentColor.opacity(isDragging ? 0.35 : 0.12))
-                    .frame(width: 46, height: 46)
-                    .blur(radius: isDragging ? 8 : 4)
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 48, height: 48)
+                    .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
+                
+                // Mesh/Glow fill
+                if isActive {
+                    MeshGradient(
+                        width: 3, height: 3,
+                        points: [
+                            [0.0, 0.0], [0.5, 0.0], [1.0, 0.0],
+                            [0.0, 0.5], [0.5, 0.5], [1.0, 0.5],
+                            [0.0, 1.0], [0.5, 1.0], [1.0, 1.0]
+                        ],
+                        colors: [
+                            app.accentColor.opacity(0.6), app.accentColor.opacity(0.2), app.accentColor.opacity(0.6),
+                            app.accentColor.opacity(0.2), app.accentColor.opacity(0.8), app.accentColor.opacity(0.2),
+                            app.accentColor.opacity(0.6), app.accentColor.opacity(0.2), app.accentColor.opacity(0.6)
+                        ]
+                    )
+                    .clipShape(Circle())
+                    .frame(width: 48, height: 48)
+                }
                 
                 // Border ring
                 Circle()
-                    .stroke(app.accentColor.opacity(app.isMuted ? 0.2 : 0.5), lineWidth: 1.5)
-                    .frame(width: 46, height: 46)
+                    .stroke(LinearGradient(
+                        colors: [.white.opacity(0.5), .clear, .white.opacity(0.1)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ), lineWidth: 1)
+                    .frame(width: 48, height: 48)
                 
                 // Real icon
                 if let icon = app.icon {
@@ -85,20 +108,36 @@ struct AppNodeView: View {
                 .foregroundStyle(app.accentColor.opacity(0.7))
                 .lineLimit(1)
         }
-        .scaleEffect(isDragging ? 1.15 : 1.0)
-        .animation(.spring(response: 0.2, dampingFraction: 0.65), value: isDragging)
+        .scaleEffect(isDragging ? 1.15 : (isSelected ? 1.05 : 1.0))
+        .animation(.bouncy(duration: 0.4, extraBounce: 0.2), value: isDragging)
+        .animation(.bouncy(duration: 0.3, extraBounce: 0.1), value: isSelected)
         .position(x: posX, y: posY)
         .gesture(
             DragGesture(minimumDistance: 5)  // 5pt threshold so taps pass through
                 .onChanged { value in
-                    isDragging = true
+                    if !isDragging {
+                        isDragging = true
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                    }
                     let nx = max(0.05, min(0.95, Double(value.location.x / canvasSize.width)))
                     let ny = max(0.05, min(0.95, Double(value.location.y / canvasSize.height)))
-                    state.setCanvasPosition(for: app, x: nx, y: ny)
-                    state.setStereoPosition(for: app, to: (nx - 0.5) * 2.0)
+                    
+                    // Snap to center logic
+                    let isCenter = abs(nx - 0.5) < 0.03
+                    let finalNx = isCenter ? 0.5 : nx
+                    
+                    if isCenter && abs(app.canvasX - 0.5) >= 0.03 {
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
+                    }
+                    
+                    state.setCanvasPosition(for: app, x: finalNx, y: ny)
+                    state.setStereoPosition(for: app, to: (finalNx - 0.5) * 2.0)
                     state.setVolume(for: app, to: max(0, min(1, 1.0 - ny)))
                 }
-                .onEnded { _ in isDragging = false }
+                .onEnded { _ in 
+                    isDragging = false 
+                    NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
+                }
         )
         .onTapGesture {
             onSelect()
@@ -142,7 +181,7 @@ public struct MainWindowView: View {
                     .toggleStyle(.checkbox)
                     
                     Button(action: {
-                        withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                        withAnimation(.bouncy(duration: 0.5, extraBounce: 0.2)) {
                             state.resetToDefaults()
                         }
                     }) {
@@ -161,7 +200,8 @@ public struct MainWindowView: View {
                     .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+                .padding(.top, 28) // Clear the traffic lights
+                .padding(.bottom, 14)
                 
                 Divider().opacity(0.3)
                 
@@ -187,14 +227,14 @@ public struct MainWindowView: View {
                         .stroke(Color.primary.opacity(0.04), lineWidth: 1)
                         
                         // Axis labels
-                        Text("LOUD").font(.system(size: 7, weight: .bold)).foregroundStyle(.tertiary)
-                            .position(x: geo.size.width/2, y: 8)
-                        Text("QUIET").font(.system(size: 7, weight: .bold)).foregroundStyle(.tertiary)
-                            .position(x: geo.size.width/2, y: geo.size.height - 8)
-                        Text("L").font(.system(size: 7, weight: .bold)).foregroundStyle(.tertiary)
-                            .position(x: 8, y: geo.size.height/2)
-                        Text("R").font(.system(size: 7, weight: .bold)).foregroundStyle(.tertiary)
-                            .position(x: geo.size.width - 8, y: geo.size.height/2)
+                        Text("LOUD").font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                            .position(x: geo.size.width/2, y: 12)
+                        Text("QUIET").font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                            .position(x: geo.size.width/2, y: geo.size.height - 12)
+                        Text("L").font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                            .position(x: 12, y: geo.size.height/2)
+                        Text("R").font(.system(size: 8, weight: .bold)).foregroundStyle(.tertiary)
+                            .position(x: geo.size.width - 12, y: geo.size.height/2)
                         
                         // Center listener
                         VStack(spacing: 2) {
@@ -214,7 +254,9 @@ public struct MainWindowView: View {
                                 app: app,
                                 canvasSize: geo.size,
                                 isSelected: selectedPID == app.id,
-                                onSelect: { selectedPID = app.id }
+                                onSelect: { 
+                                    withAnimation(.bouncy) { selectedPID = app.id }
+                                }
                             )
                         }
                     }
@@ -235,11 +277,11 @@ public struct MainWindowView: View {
                     emptyInspector
                 }
             }
-            .frame(width: 240)
-            .background(.ultraThinMaterial)
+            .frame(width: 260)
+            .background(Color.black.opacity(0.1))
         }
-        .frame(width: 680, height: 480)
-        .background(VisualEffectView(material: .headerView, blendingMode: .withinWindow))
+        .frame(width: 720, height: 500)
+        .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
     }
     
     // MARK: - Inspector Content
@@ -359,8 +401,9 @@ public struct MainWindowView: View {
                 }
                 
                 Button(action: {
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                    withAnimation(.bouncy(duration: 0.5, extraBounce: 0.2)) {
                         state.snapToCenter(for: app)
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .default)
                     }
                 }) {
                     Label("Snap to Center", systemImage: "scope")

@@ -6,10 +6,11 @@ struct AudioMixerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
     var body: some Scene {
-        WindowGroup("AudioMixer Spatial Studio", id: "spatial-studio") {
+        WindowGroup("Aura", id: "spatial-studio") {
             MainWindowView()
                 .frame(minWidth: 600, minHeight: 450)
         }
+        .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
     }
 }
@@ -21,15 +22,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var appState = AppState.shared
     private var eventMonitor: Any?
     private var appearanceObservation: NSKeyValueObservation?
-    
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupDropdownWindow()
-        
-        // Force Dock icon to update when system appearance changes
-        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.initial, .new]) { _, _ in
-            NSApp.applicationIconImage = NSImage(named: "AppIcon")
-        }
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -41,7 +36,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         guard let button = statusItem?.button else { return }
         
-        button.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "AudioMixer")
+        if let image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "AudioMixer") {
+            image.isTemplate = true
+            button.image = image
+        }
+        
         button.action = #selector(statusBarButtonClicked(_:))
         button.target = self
     }
@@ -60,8 +59,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.level = .popUpMenu
         window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
         
+        // Native macOS 27 VisualEffectView for Menu Bar Dropdowns
+        let effectView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
+        effectView.material = .popover
+        effectView.blendingMode = .behindWindow
+        effectView.state = .active
+        // Keep corners rounded
+        effectView.wantsLayer = true
+        effectView.layer?.cornerRadius = 16
+        effectView.layer?.cornerCurve = .continuous
+        effectView.layer?.masksToBounds = true
+        
         let contentView = NSHostingView(rootView: MenuBarDropdownView())
-        window.contentView = contentView
+        contentView.frame = effectView.bounds
+        contentView.autoresizingMask = [.width, .height]
+        
+        effectView.addSubview(contentView)
+        window.contentView = effectView
         
         self.dropdownWindow = window
     }
