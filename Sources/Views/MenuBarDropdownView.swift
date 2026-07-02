@@ -1,5 +1,35 @@
 import SwiftUI
 
+// MARK: - GPU-driven EQ Bars (TimelineView + Canvas — zero state mutations)
+
+struct EQBars: View {
+    let accentColor: Color
+    let isActive: Bool
+
+    var body: some View {
+        TimelineView(.animation(paused: !isActive)) { timeline in
+            Canvas { context, size in
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let barCount = 3
+                let gap: CGFloat = 1.5
+                let barW = (size.width - gap * CGFloat(barCount - 1)) / CGFloat(barCount)
+                let freqs: [Double] = [2.1, 3.4, 1.7]
+                let phases: [Double] = [0.0, 1.3, 2.5]
+
+                for i in 0..<barCount {
+                    let amplitude = sin(t * freqs[i] + phases[i]) * 0.35 + 0.65
+                    let h = size.height * amplitude
+                    let x = CGFloat(i) * (barW + gap)
+                    let rect = CGRect(x: x, y: size.height - h, width: barW, height: h)
+                    context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(accentColor))
+                }
+            }
+        }
+        .opacity(isActive ? 1.0 : 0.2)
+        .animation(.easeInOut(duration: 0.35), value: isActive)
+    }
+}
+
 // MARK: - Glass Volume Slider
 
 struct GlassVolumeSlider: View {
@@ -18,16 +48,7 @@ struct GlassVolumeSlider: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(Color.primary.opacity(isHovering ? 0.15 : 0.07), lineWidth: 0.5)
                     )
-                
-                // dB activity glow
-                if !app.isMuted {
-                    let lvl = CGFloat(max(0, (app.dbLevel + 60) / 60.0))
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(app.accentColor.opacity(0.15))
-                        .frame(width: geo.size.width * lvl)
-                        .animation(.interactiveSpring(response: 0.12, dampingFraction: 0.7), value: lvl)
-                }
-                
+
                 // Mesh Gradient Volume fill
                 if !app.isMuted {
                     MeshGradient(
@@ -51,7 +72,7 @@ struct GlassVolumeSlider: View {
                         .fill(Color.primary.opacity(0.1))
                         .frame(width: geo.size.width * CGFloat(app.volume))
                 }
-                
+
                 // Glass shine
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(LinearGradient(
@@ -117,8 +138,7 @@ public struct MenuBarDropdownView: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.secondary)
                         .padding(5)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(Circle())
+                        .glassEffect(.regular, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .help("Reset all to defaults")
@@ -189,8 +209,7 @@ public struct MenuBarDropdownView: View {
                             Text("Spatial Soundstage...").font(.system(size: 11, weight: .semibold))
                         }
                         .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(Color.accentColor.opacity(0.1))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .glassEffect(.regular.tint(Color.accentColor.opacity(0.12)), in: .rect(cornerRadius: 8))
                         .foregroundStyle(Color.accentColor)
                     }
                     .buttonStyle(.plain)
@@ -231,10 +250,10 @@ public struct MenuBarDropdownView: View {
                 } else {
                     Image(systemName: "app.fill").font(.system(size: 14)).foregroundStyle(app.accentColor)
                 }
-                // Active dot
-                if app.isKnownAudioApp && !app.isMuted {
-                    Circle().fill(Color.green).frame(width: 5, height: 5).offset(x: 12, y: -12)
-                }
+                // EQ bars replace the static activity dot
+                EQBars(accentColor: app.accentColor, isActive: app.isKnownAudioApp && !app.isMuted)
+                    .frame(width: 14, height: 9)
+                    .offset(x: 9, y: 11)
             }
             
             VStack(alignment: .leading, spacing: 3) {

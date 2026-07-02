@@ -19,29 +19,23 @@ struct AppNodeView: View {
     var body: some View {
         VStack(spacing: 3) {
             ZStack {
-                // Pulse ring for active audio apps
+                // Active glow ring (smooth, no repeating animation jitter)
                 if isActive {
                     Circle()
-                        .stroke(app.accentColor.opacity(0.3), lineWidth: 2)
-                        .frame(width: 56, height: 56)
-                        .scaleEffect(1.05)
-                        .animation(.bouncy.repeatForever(autoreverses: true), value: isActive)
+                        .stroke(app.accentColor.opacity(isDragging ? 0.6 : 0.25), lineWidth: 2)
+                        .frame(width: 58, height: 58)
+                        .blur(radius: 2)
                 }
-                
+
                 // Selection ring
                 if isSelected {
                     Circle()
-                        .stroke(Color.white.opacity(0.9), lineWidth: 3)
-                        .frame(width: 54, height: 54)
+                        .stroke(Color.white.opacity(0.9), lineWidth: 2.5)
+                        .frame(width: 56, height: 56)
+                        .shadow(color: app.accentColor.opacity(0.4), radius: 6)
                 }
-                
-                // Glass puck background
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .frame(width: 48, height: 48)
-                    .shadow(color: Color.black.opacity(0.15), radius: 8, x: 0, y: 4)
-                
-                // Mesh/Glow fill
+
+                // Mesh colour fill for active apps
                 if isActive {
                     MeshGradient(
                         width: 3, height: 3,
@@ -51,24 +45,16 @@ struct AppNodeView: View {
                             [0.0, 1.0], [0.5, 1.0], [1.0, 1.0]
                         ],
                         colors: [
-                            app.accentColor.opacity(0.6), app.accentColor.opacity(0.2), app.accentColor.opacity(0.6),
-                            app.accentColor.opacity(0.2), app.accentColor.opacity(0.8), app.accentColor.opacity(0.2),
-                            app.accentColor.opacity(0.6), app.accentColor.opacity(0.2), app.accentColor.opacity(0.6)
+                            app.accentColor.opacity(0.5), app.accentColor.opacity(0.2), app.accentColor.opacity(0.5),
+                            app.accentColor.opacity(0.2), app.accentColor.opacity(0.7), app.accentColor.opacity(0.2),
+                            app.accentColor.opacity(0.5), app.accentColor.opacity(0.2), app.accentColor.opacity(0.5)
                         ]
                     )
                     .clipShape(Circle())
                     .frame(width: 48, height: 48)
                 }
-                
-                // Border ring
-                Circle()
-                    .stroke(LinearGradient(
-                        colors: [.white.opacity(0.5), .clear, .white.opacity(0.1)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    ), lineWidth: 1)
-                    .frame(width: 48, height: 48)
-                
-                // Real icon
+
+                // App icon
                 if let icon = app.icon {
                     Image(nsImage: icon)
                         .resizable()
@@ -80,7 +66,7 @@ struct AppNodeView: View {
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(app.accentColor)
                 }
-                
+
                 // Muted badge
                 if app.isMuted {
                     Image(systemName: "speaker.slash.fill")
@@ -92,15 +78,21 @@ struct AppNodeView: View {
                         .offset(x: 14, y: -14)
                 }
             }
-            
+            // Native Liquid Glass puck — replaces manual NSVisualEffectView bridging
+            .frame(width: 48, height: 48)
+            .glassEffect(
+                .regular.tint(isSelected ? app.accentColor.opacity(0.2) : app.accentColor.opacity(0.07)).interactive(),
+                in: Circle()
+            )
+            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+
             // Name label
             Text(app.name)
                 .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .lineLimit(1)
-                .padding(.horizontal, 5)
+                .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
+                .glassEffect(.regular, in: .capsule)
             
             // Output badge
             Text(app.outputDevice.shortName)
@@ -150,7 +142,8 @@ struct AppNodeView: View {
 public struct MainWindowView: View {
     @ObservedObject var state = AppState.shared
     @State private var selectedPID: Int32? = nil
-    
+    @Environment(\.appearsActive) private var appearsActive
+
     public init() {}
     
     var selectedApp: AudioApp? {
@@ -282,6 +275,8 @@ public struct MainWindowView: View {
         }
         .frame(width: 720, height: 500)
         .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
+        .opacity(appearsActive ? 1.0 : 0.88)
+        .animation(.easeInOut(duration: 0.25), value: appearsActive)
     }
     
     // MARK: - Inspector Content
