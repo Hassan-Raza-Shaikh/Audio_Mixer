@@ -51,11 +51,13 @@ public struct AudioApp: Identifiable {
     public var isKnownAudioApp: Bool = false
     public var canvasX: Double = 0.5
     public var canvasY: Double = 0.5
+    public var isSpatialEnabled: Bool = false
 
     public init(name: String, bundleId: String, pid: Int32, icon: NSImage? = nil,
                 volume: Double = 0.8, stereoPosition: Double = 0.0,
                 outputDevice: AudioDevice,
-                canvasX: Double = 0.5, canvasY: Double = 0.5) {
+                canvasX: Double = 0.5, canvasY: Double = 0.5,
+                isSpatialEnabled: Bool = false) {
         self.id = pid
         self.name = name
         self.bundleId = bundleId
@@ -67,6 +69,7 @@ public struct AudioApp: Identifiable {
         self.canvasX = canvasX
         self.canvasY = canvasY
         self.isKnownAudioApp = knownAudioBundlePrefixes.contains(where: { bundleId.hasPrefix($0) })
+        self.isSpatialEnabled = isSpatialEnabled
 
         let b = bundleId.lowercased()
         if b.contains("spotify") || b.contains("music") || b.contains("tidal") {
@@ -96,8 +99,15 @@ public class AppState: ObservableObject {
     @Published var apps: [AudioApp] = []
     @Published var devices: [AudioDevice] = []
     @Published var defaultDevice: AudioDevice?
-    @Published var isLoopbackEnabled: Bool = false
+    @Published var isLoopbackEnabled: Bool = false {
+        didSet {
+            handleLoopbackToggle(isEnabled: isLoopbackEnabled)
+        }
+    }
     @Published var showAllApps: Bool = true
+    @Published var activeTab: String = "mixer" // "mixer" or "spatial"
+
+    private var originalDefaultDevice: AudioDevice?
 
     private init() {
         loadInitialState()
@@ -108,8 +118,7 @@ public class AppState: ObservableObject {
         self.devices = fetched
         self.defaultDevice = fetched.first(where: { $0.isDefault }) ?? fetched.first
         updateRunningApps()
-        // Refresh every 2s only to catch newly opened/closed apps.
-        // No high-frequency timers — all activity animation is pure view-layer.
+        
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in self.updateRunningApps() }
@@ -127,6 +136,13 @@ public class AppState: ObservableObject {
         let existingPIDs = Set(self.apps.map { $0.pid })
         let runningPIDs  = Set(running.map  { $0.processIdentifier })
 
+        // Stop capture for apps that closed
+        for oldApp in self.apps {
+            if !runningPIDs.contains(oldApp.pid) {
+                AudioCaptureEngine.shared.stopCapture(for: oldApp.pid)
+            }
+        }
+
         var updatedApps = self.apps.filter { runningPIDs.contains($0.pid) }
 
         let totalForLayout = running.count
@@ -137,18 +153,22 @@ public class AppState: ObservableObject {
             let idx = updatedApps.count
             let (cx, cy) = Self.circularPosition(for: idx, total: totalForLayout)
 
-            // Position IS state: Y drives volume, X drives stereo
-            let derivedVolume = max(0, min(1, 1.0 - cy))
-            let derivedStereo = (cx - 0.5) * 2.0
+            // Start capture ONLY if it's a known audio app to avoid startup deadlocks on non-audio system apps
+            let isKnown = knownAudioBundlePrefixes.contains(where: { bundleId.hasPrefix($0) })
+            if isKnown {
+                AudioCaptureEngine.shared.startCapture(for: app.processIdentifier, appName: name, deviceUID: defaultOutput.id)
+            }
 
+            // Spawns with standard center balance, default volume, spatial disabled
             let newApp = AudioApp(
                 name: name, bundleId: bundleId,
                 pid: app.processIdentifier,
                 icon: app.icon,
-                volume: derivedVolume,
-                stereoPosition: derivedStereo,
+                volume: 0.8,
+                stereoPosition: 0.0,
                 outputDevice: defaultOutput,
-                canvasX: cx, canvasY: cy
+                canvasX: cx, canvasY: cy,
+                isSpatialEnabled: false
             )
             updatedApps.append(newApp)
         }
@@ -167,59 +187,157 @@ public class AppState: ObservableObject {
         return (0.5 + radius * cos(angle), 0.5 + radius * sin(angle))
     }
 
-    // MARK: - Mutators — all keep canvas ↔ audio in sync
+    // MARK: - Loopback Auto-Routing
+
+    private func handleLoopbackToggle(isEnabled: Bool) {
+        if isEnabled {
+            // Find a virtual device (Microsoft Teams Audio or BlackHole or Soundflower)
+            if let virtualDevice = devices.first(where: {
+                let n = $0.name.lowercased()
+                return n.contains("teams") || n.contains("blackhole") || n.contains("soundflower") || n.contains("loopback")
+            }) {
+                // Store current physical default output
+                if let currentDefault = defaultDevice, !currentDefault.id.contains("teams") && !currentDefault.id.contains("blackhole") {
+                    originalDefaultDevice = currentDefault
+                }
+                
+                // Redirect system default to virtual loopback device
+                AudioDeviceManager.shared.setDefaultOutputDevice(deviceID: virtualDevice)
+                print("Aura Loopback: Redirected system default output to virtual device: \(virtualDevice.name)")
+            } else {
+                print("Aura Loopback Warning: No virtual audio loopback device found on this system.")
+            }
+        } else {
+            // Restore original physical default output
+            if let restoreDev = originalDefaultDevice {
+                AudioDeviceManager.shared.setDefaultOutputDevice(deviceID: restoreDev)
+                print("Aura Loopback: Restored system default output to: \(restoreDev.name)")
+            }
+        }
+        
+        // Refresh device list to update isDefault attributes
+        let fetched = AudioDeviceManager.shared.fetchOutputDevices()
+        self.devices = fetched
+        self.defaultDevice = fetched.first(where: { $0.isDefault }) ?? fetched.first
+    }
+
+    // MARK: - Mutators
+
+    private func ensureCaptureStarted(for app: AudioApp) {
+        AudioCaptureEngine.shared.startCapture(for: app.pid, appName: app.name, deviceUID: app.outputDevice.id)
+    }
 
     public func setCanvasPosition(for app: AudioApp, x: Double, y: Double) {
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
-        apps[i].canvasX        = x
-        apps[i].canvasY        = y
-        apps[i].volume         = max(0, min(1, 1.0 - y))
-        apps[i].stereoPosition = (x - 0.5) * 2.0
+        apps[i].canvasX = x
+        apps[i].canvasY = y
+        
+        // Coupling only updates volume/balance if spatial mode is actively enabled
+        if apps[i].isSpatialEnabled {
+            ensureCaptureStarted(for: apps[i])
+            let volume = max(0, min(1, 1.0 - y))
+            let stereo = (x - 0.5) * 2.0
+            apps[i].volume         = volume
+            apps[i].stereoPosition = stereo
+            
+            AudioCaptureEngine.shared.updateVolume(for: app.pid, volume: volume)
+            AudioCaptureEngine.shared.updatePan(for: app.pid, pan: stereo)
+        }
     }
 
     public func setVolume(for app: AudioApp, to volume: Double) {
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
+        ensureCaptureStarted(for: apps[i])
         apps[i].volume  = volume
         apps[i].canvasY = 1.0 - volume
+        AudioCaptureEngine.shared.updateVolume(for: app.pid, volume: volume)
     }
 
     public func setStereoPosition(for app: AudioApp, to pos: Double) {
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
+        ensureCaptureStarted(for: apps[i])
         apps[i].stereoPosition = pos
         apps[i].canvasX = (pos / 2.0) + 0.5
+        AudioCaptureEngine.shared.updatePan(for: app.pid, pan: pos)
     }
 
     public func toggleMute(for app: AudioApp) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].isMuted.toggle() }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            ensureCaptureStarted(for: apps[i])
+            apps[i].isMuted.toggle()
+            AudioCaptureEngine.shared.updateMute(for: app.pid, isMuted: apps[i].isMuted)
+        }
     }
+    
     public func toggleRecording(for app: AudioApp) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].isRecording.toggle() }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            ensureCaptureStarted(for: apps[i])
+            apps[i].isRecording.toggle()
+            if apps[i].isRecording {
+                AudioCaptureEngine.shared.startRecording(for: app.pid, appName: app.name)
+            } else {
+                AudioCaptureEngine.shared.stopRecording(for: app.pid)
+            }
+        }
     }
+    
     public func setOutputDevice(for app: AudioApp, to device: AudioDevice) {
-        if let i = apps.firstIndex(where: { $0.id == app.id }) { apps[i].outputDevice = device }
+        if let i = apps.firstIndex(where: { $0.id == app.id }) {
+            ensureCaptureStarted(for: apps[i])
+            apps[i].outputDevice = device
+            AudioCaptureEngine.shared.updateRoute(for: app.pid, deviceUID: device.id)
+        }
+    }
+
+    public func toggleSpatial(for app: AudioApp) {
+        guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
+        apps[i].isSpatialEnabled.toggle()
+        
+        // When enabling spatial, immediately couple settings to canvas coordinates
+        if apps[i].isSpatialEnabled {
+            ensureCaptureStarted(for: apps[i])
+            let volume = max(0, min(1, 1.0 - apps[i].canvasY))
+            let stereo = (apps[i].canvasX - 0.5) * 2.0
+            apps[i].volume         = volume
+            apps[i].stereoPosition = stereo
+            
+            AudioCaptureEngine.shared.updateVolume(for: app.pid, volume: volume)
+            AudioCaptureEngine.shared.updatePan(for: app.pid, pan: stereo)
+        }
     }
 
     public func snapToCenter(for app: AudioApp) {
         guard let i = apps.firstIndex(where: { $0.id == app.id }) else { return }
+        ensureCaptureStarted(for: apps[i])
         apps[i].stereoPosition = 0.0
         apps[i].volume         = 0.8
         apps[i].canvasX        = 0.5
-        apps[i].canvasY        = 1.0 - 0.8   // 0.2 → near top → loud
+        apps[i].canvasY        = 1.0 - 0.8
+        
+        AudioCaptureEngine.shared.updateVolume(for: app.pid, volume: 0.8)
+        AudioCaptureEngine.shared.updatePan(for: app.pid, pan: 0.0)
     }
-
-    public func selectApp(_ app: AudioApp) -> Int32 { app.id }
 
     public func resetToDefaults() {
         let defaultDev = defaultDevice ?? devices.first
         let total = apps.count
         for i in 0..<apps.count {
-            if let dev = defaultDev { apps[i].outputDevice = dev }
-            apps[i].isMuted = false
+            if let dev = defaultDev {
+                apps[i].outputDevice = dev
+                AudioCaptureEngine.shared.updateRoute(for: apps[i].pid, deviceUID: dev.id)
+            }
+            apps[i].isMuted          = false
+            apps[i].isSpatialEnabled = false
+            apps[i].volume           = 0.8
+            apps[i].stereoPosition   = 0.0
+            
+            AudioCaptureEngine.shared.updateVolume(for: apps[i].pid, volume: 0.8)
+            AudioCaptureEngine.shared.updatePan(for: apps[i].pid, pan: 0.0)
+            AudioCaptureEngine.shared.updateMute(for: apps[i].pid, isMuted: false)
+            
             let (cx, cy) = Self.circularPosition(for: i, total: total)
             apps[i].canvasX        = cx
             apps[i].canvasY        = cy
-            apps[i].volume         = max(0, min(1, 1.0 - cy))
-            apps[i].stereoPosition = (cx - 0.5) * 2.0
         }
     }
 

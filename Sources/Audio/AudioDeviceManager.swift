@@ -64,8 +64,39 @@ public final class AudioDeviceManager: Sendable {
         }
     }
     
+    public func getDeviceID(for uid: String) -> AudioObjectID? {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize) == noErr else { return nil }
+        
+        let deviceCount = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var deviceIDs = [AudioObjectID](repeating: 0, count: deviceCount)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &propertyAddress, 0, nil, &dataSize, &deviceIDs) == noErr else { return nil }
+        
+        for id in deviceIDs {
+            if getDeviceUID(deviceID: id) == uid {
+                return id
+            }
+        }
+        return nil
+    }
+
     public func setDefaultOutputDevice(deviceID: AudioDevice) {
-        print("CoreAudio HAL: Would set default output to \(deviceID.name)")
+        print("CoreAudio HAL: Setting default output to \(deviceID.name)")
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if let id = getDeviceID(for: deviceID.id) {
+            var rawID = id
+            let sz = UInt32(MemoryLayout<AudioObjectID>.size)
+            AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, sz, &rawID)
+        }
     }
     
     // MARK: - Private Helpers
@@ -102,10 +133,9 @@ public final class AudioDeviceManager: Sendable {
         let transport = getTransportType(deviceID: deviceID)
         if transport == kAudioDeviceTransportTypeContinuityCapture { return true }
         
-        // Filter by name keywords
-        let name = getDeviceName(deviceID: deviceID).lowercased()
-        let blocklist = ["microphone", " mic", "input only", "capture", "iphone", "ipad"]
-        return blocklist.contains(where: { name.contains($0) })
+        // Remove strict blocklists for virtual devices (like Teams, Soundflower, Aux, Bluetooth)
+        // Only block devices that explicitly have no outputs or are Continuity cameras.
+        return false
     }
     
     private func getTransportType(deviceID: AudioObjectID) -> UInt32 {

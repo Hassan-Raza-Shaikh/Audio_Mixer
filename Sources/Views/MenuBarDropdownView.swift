@@ -184,19 +184,19 @@ public struct MenuBarDropdownView: View {
             VStack(spacing: 8) {
                 Toggle(isOn: $state.isLoopbackEnabled) {
                     HStack(spacing: 5) {
-                        Image(systemName: "record.circle.fill")
+                        Image(systemName: "arrow.2.squarepath")
                             .font(.system(size: 11))
-                            .foregroundStyle(state.isLoopbackEnabled ? .red : .secondary)
+                            .foregroundStyle(state.isLoopbackEnabled ? Color.accentColor : .secondary)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("System Audio Loopback")
+                            Text("Split & Route Audio")
                                 .font(.system(size: 11, weight: .medium))
-                            Text("Pipes screen audio to screen recorders")
+                            Text("Redirects apps through Aura's routing engine")
                                 .font(.system(size: 8))
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
-                .toggleStyle(SwitchToggleStyle(tint: .red))
+                .toggleStyle(SwitchToggleStyle(tint: Color.accentColor))
                 .padding(.horizontal, 2)
                 
                 HStack {
