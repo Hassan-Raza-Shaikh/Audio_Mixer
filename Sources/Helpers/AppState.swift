@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import AVFoundation
 
 // MARK: - Audio Device
 
@@ -104,8 +105,19 @@ public class AppState: ObservableObject {
             handleLoopbackToggle(isEnabled: isLoopbackEnabled)
         }
     }
-    @Published var showAllApps: Bool = true
+    @Published var showAllApps: Bool = false
     @Published var activeTab: String = "mixer" // "mixer" or "spatial"
+
+    /// Whether Aura can capture app audio. The preferred process-tap path needs
+    /// Audio Recording (microphone) access; the ScreenCaptureKit fallback needs
+    /// Screen Recording. Either one is enough, so the banner only shows when
+    /// neither is granted. Surfaced in the UI so capture doesn't silently fail.
+    @Published var hasCapturePermission: Bool = AppState.computeCapturePermission()
+
+    private static func computeCapturePermission() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+            || AudioCaptureEngine.hasScreenRecordingPermission()
+    }
 
     private var originalDefaultDevice: AudioDevice?
 
@@ -114,14 +126,47 @@ public class AppState: ObservableObject {
     }
 
     private func loadInitialState() {
+        refreshDevices()
+        updateRunningApps()
+
+        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.updateRunningApps()
+                let granted = AppState.computeCapturePermission()
+                if granted != self.hasCapturePermission { self.hasCapturePermission = granted }
+            }
+        }
+    }
+
+    /// Re-reads the available output devices and the current system default.
+    func refreshDevices() {
         let fetched = AudioDeviceManager.shared.fetchOutputDevices()
         self.devices = fetched
         self.defaultDevice = fetched.first(where: { $0.isDefault }) ?? fetched.first
-        updateRunningApps()
-        
-        Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in self.updateRunningApps() }
+    }
+
+    /// Requests audio-capture access for the process-tap path. If it hasn't been
+    /// decided yet the OS prompt appears; otherwise we deep-link to the relevant
+    /// Privacy pane so the user can enable it manually.
+    func requestCapturePermission() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        switch status {
+        case .authorized:
+            hasCapturePermission = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.hasCapturePermission = granted || AudioCaptureEngine.hasScreenRecordingPermission()
+                    if !granted { AudioCaptureEngine.requestScreenRecordingPermission() }
+                }
+            }
+        default:
+            // Previously denied — send the user to System Settings.
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 
@@ -136,48 +181,53 @@ public class AppState: ObservableObject {
         let existingPIDs = Set(self.apps.map { $0.pid })
         let runningPIDs  = Set(running.map  { $0.processIdentifier })
 
-        // Stop capture for apps that closed
-        for oldApp in self.apps {
-            if !runningPIDs.contains(oldApp.pid) {
-                AudioCaptureEngine.shared.stopCapture(for: oldApp.pid)
-            }
+        // Fast path: membership unchanged, so nothing to publish. This keeps the
+        // 2s poller from rebuilding the array (and re-rendering the whole UI)
+        // when the set of running apps hasn't actually changed.
+        if runningPIDs == existingPIDs { return }
+
+        // Stop capture for apps that have quit.
+        for oldApp in self.apps where !runningPIDs.contains(oldApp.pid) {
+            AudioCaptureEngine.shared.stopCapture(for: oldApp.pid)
         }
 
+        // Keep existing apps (preserving their user-set state), append newcomers.
         var updatedApps = self.apps.filter { runningPIDs.contains($0.pid) }
 
-        let totalForLayout = running.count
         for app in running {
             guard !existingPIDs.contains(app.processIdentifier) else { continue }
             guard let name = app.localizedName, let bundleId = app.bundleIdentifier else { continue }
 
-            let idx = updatedApps.count
-            let (cx, cy) = Self.circularPosition(for: idx, total: totalForLayout)
-
-            // Start capture ONLY if it's a known audio app to avoid startup deadlocks on non-audio system apps
-            let isKnown = knownAudioBundlePrefixes.contains(where: { bundleId.hasPrefix($0) })
-            if isKnown {
-                AudioCaptureEngine.shared.startCapture(for: app.processIdentifier, appName: name, deviceUID: defaultOutput.id)
-            }
-
-            // Spawns with standard center balance, default volume, spatial disabled
-            let newApp = AudioApp(
+            // Capture is started lazily on first user interaction (see
+            // `ensureCaptureStarted`), not here — launching taps for every app
+            // would be wasteful and would trigger the permission prompt storm.
+            updatedApps.append(AudioApp(
                 name: name, bundleId: bundleId,
                 pid: app.processIdentifier,
                 icon: app.icon,
                 volume: 0.8,
                 stereoPosition: 0.0,
-                outputDevice: defaultOutput,
-                canvasX: cx, canvasY: cy,
-                isSpatialEnabled: false
-            )
-            updatedApps.append(newApp)
+                outputDevice: defaultOutput
+            ))
         }
 
+        // Known audio apps first, then alphabetical.
         updatedApps.sort {
             if $0.isKnownAudioApp != $1.isKnownAudioApp { return $0.isKnownAudioApp }
-            return $0.name < $1.name
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
         self.apps = updatedApps
+        assignSpatialLayout()
+    }
+
+    /// Positions apps evenly around the listener on the spatial soundstage.
+    private func assignSpatialLayout() {
+        let total = apps.count
+        for i in 0..<apps.count where !apps[i].isSpatialEnabled {
+            let (cx, cy) = Self.circularPosition(for: i, total: total)
+            apps[i].canvasX = cx
+            apps[i].canvasY = cy
+        }
     }
 
     static func circularPosition(for index: Int, total: Int) -> (Double, Double) {
@@ -216,14 +266,16 @@ public class AppState: ObservableObject {
         }
         
         // Refresh device list to update isDefault attributes
-        let fetched = AudioDeviceManager.shared.fetchOutputDevices()
-        self.devices = fetched
-        self.defaultDevice = fetched.first(where: { $0.isDefault }) ?? fetched.first
+        refreshDevices()
     }
 
     // MARK: - Mutators
 
+    /// Starts a capture stream for an app the first time it's touched. This is
+    /// idempotent: if a stream already exists it does nothing, so dragging a
+    /// slider no longer tears down and rebuilds the capture on every tick.
     private func ensureCaptureStarted(for app: AudioApp) {
+        guard !AudioCaptureEngine.shared.isCapturing(pid: app.pid) else { return }
         AudioCaptureEngine.shared.startCapture(for: app.pid, appName: app.name, deviceUID: app.outputDevice.id)
     }
 
@@ -285,7 +337,7 @@ public class AppState: ObservableObject {
         if let i = apps.firstIndex(where: { $0.id == app.id }) {
             ensureCaptureStarted(for: apps[i])
             apps[i].outputDevice = device
-            AudioCaptureEngine.shared.updateRoute(for: app.pid, deviceUID: device.id)
+            AudioCaptureEngine.shared.updateRoute(for: app.pid, appName: apps[i].name, deviceUID: device.id)
         }
     }
 
@@ -324,7 +376,7 @@ public class AppState: ObservableObject {
         for i in 0..<apps.count {
             if let dev = defaultDev {
                 apps[i].outputDevice = dev
-                AudioCaptureEngine.shared.updateRoute(for: apps[i].pid, deviceUID: dev.id)
+                AudioCaptureEngine.shared.updateRoute(for: apps[i].pid, appName: apps[i].name, deviceUID: dev.id)
             }
             apps[i].isMuted          = false
             apps[i].isSpatialEnabled = false

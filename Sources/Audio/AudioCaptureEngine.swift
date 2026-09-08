@@ -2,6 +2,7 @@ import Foundation
 import ScreenCaptureKit
 import AVFoundation
 import CoreAudio
+import CoreGraphics
 
 /// Thread-safe queue for buffering PCM audio packets
 class AudioBufferQueue {
@@ -96,6 +97,7 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
     public static let shared = AudioCaptureEngine()
     
     private var activeStreams: [Int32: SCStream] = [:]
+    private var processTaps: [Int32: ProcessTapCapture] = [:]
     private var engines: [String: AVAudioEngine] = [:]
     private var channels: [Int32: PlaybackChannel] = [:]
     private let channelsLock = NSLock()
@@ -120,15 +122,46 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
     
     private override init() {
         super.init()
-        createMediaFolderIfNeeded()
     }
-    
-    private func createMediaFolderIfNeeded() {
-        let mediaPath = "/Users/hassan/Media"
-        if !FileManager.default.fileExists(atPath: mediaPath) {
-            try? FileManager.default.createDirectory(atPath: mediaPath, withIntermediateDirectories: true, attributes: nil)
-            print("Audio Mixer Setup: Created Media folder at \(mediaPath)")
+
+    /// User-visible folder where per-app recordings are written: ~/Music/Aura Recordings
+    static var recordingsDirectory: URL {
+        let base = FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Music")
+        return base.appendingPathComponent("Aura Recordings", isDirectory: true)
+    }
+
+    private func ensureRecordingsDirectory() -> URL {
+        let dir = Self.recordingsDirectory
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
+        return dir
+    }
+
+    /// True if a live capture stream already exists for this process.
+    /// Callers use this to keep `startCapture` idempotent instead of tearing
+    /// down and rebuilding the stream on every parameter change.
+    public func isCapturing(pid: Int32) -> Bool {
+        channelsLock.lock()
+        defer { channelsLock.unlock() }
+        return channels[pid] != nil
+    }
+
+    // MARK: - Permissions
+
+    /// Whether Screen Recording access (required by ScreenCaptureKit to tap
+    /// application audio) has already been granted.
+    public static func hasScreenRecordingPermission() -> Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    /// Prompts for Screen Recording access if it hasn't been granted yet.
+    /// The system only shows the prompt once; afterwards the user must enable
+    /// it in System Settings > Privacy & Security > Screen Recording.
+    @discardableResult
+    public static func requestScreenRecordingPermission() -> Bool {
+        CGRequestScreenCaptureAccess()
     }
     
     /// Returns the engine for a device, starting it if necessary
@@ -167,16 +200,36 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
         }
     }
     
-    /// Starts capturing and playing back audio for a specific app
+    /// Starts capturing and playing back audio for a specific app.
+    ///
+    /// Prefers the Core Audio process-tap path (mutes the app's own output so
+    /// there's no doubled audio); if that can't be set up it falls back to
+    /// ScreenCaptureKit, which captures without muting the original.
     public func startCapture(for pid: Int32, appName: String, deviceUID: String) {
-        print("Aura Capture: Preparing real-time audio bridge for \(appName) (PID: \(pid)) -> \(deviceUID)")
-        
-        // Stop previous capture/playback if any
+        print("Aura Capture: Preparing audio bridge for \(appName) (PID: \(pid)) -> \(deviceUID)")
+
+        // Stop previous capture/playback if any.
         stopCapture(for: pid)
-        
+
         let channel = PlaybackChannel(pid: pid, deviceUID: deviceUID)
         setChannel(channel, for: pid)
-        
+
+        // Stage B: process tap (preferred).
+        let tap = ProcessTapCapture(pid: pid) { [weak self] buffer in
+            self?.getChannel(for: pid)?.enqueueBuffer(buffer)
+        }
+        if tap.start() {
+            channelsLock.lock(); processTaps[pid] = tap; channelsLock.unlock()
+            print("Aura Capture: process-tap active for \(appName) (PID: \(pid))")
+            return
+        }
+
+        // Fallback: ScreenCaptureKit.
+        print("Aura Capture: process tap unavailable, falling back to ScreenCaptureKit for \(appName)")
+        startSCStreamCapture(for: pid, appName: appName)
+    }
+
+    private func startSCStreamCapture(for pid: Int32, appName: String) {
         Task {
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
@@ -184,7 +237,7 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
                     print("Aura Capture Error: App with PID \(pid) not found in shareable content.")
                     return
                 }
-                
+
                 guard let firstDisplay = content.displays.first else {
                     print("Aura Capture Error: No display found to capture.")
                     return
@@ -194,14 +247,14 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
                 configuration.capturesAudio = true
                 configuration.sampleRate = 44100
                 configuration.channelCount = 2
-                
+
                 let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
                 try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "com.hassan.Aura.CaptureQueue.\(pid)"))
-                
+
                 try await stream.startCapture()
                 self.activeStreams[pid] = stream
-                print("Aura Capture: Tap active for \(appName) (PID: \(pid))")
-                
+                print("Aura Capture: SCStream tap active for \(appName) (PID: \(pid))")
+
             } catch {
                 print("Aura Capture Error: Failed to start SCStream for \(appName): \(error.localizedDescription)")
             }
@@ -210,6 +263,11 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
     
     /// Stops capturing and tears down playback channel
     public func stopCapture(for pid: Int32) {
+        channelsLock.lock()
+        let tap = processTaps.removeValue(forKey: pid)
+        channelsLock.unlock()
+        tap?.stop()
+
         if let stream = activeStreams[pid] {
             Task {
                 try? await stream.stopCapture()
@@ -248,16 +306,19 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
         return getChannel(for: pid)?.peak ?? 0.0
     }
     
-    public func updateRoute(for pid: Int32, deviceUID: String) {
+    public func updateRoute(for pid: Int32, appName: String, deviceUID: String) {
         guard let channel = getChannel(for: pid) else { return }
+        // Nothing to do if it's already routed to this device.
+        guard channel.deviceUID != deviceUID else { return }
+
         let currentVol = channel.volume
         let currentPan = channel.pan
         let currentMute = channel.isMuted
-        
-        // Re-setup capture stream pointing to new engine output
-        startCapture(for: pid, appName: "App", deviceUID: deviceUID)
-        
-        // Restore values
+
+        // Re-setup capture stream pointing to the new engine output.
+        startCapture(for: pid, appName: appName, deviceUID: deviceUID)
+
+        // Restore user-set values onto the freshly created channel.
         if let newChannel = getChannel(for: pid) {
             newChannel.volume = currentVol
             newChannel.pan = currentPan
@@ -269,13 +330,13 @@ public final class AudioCaptureEngine: NSObject, SCStreamOutput, @unchecked Send
     
     public func startRecording(for pid: Int32, appName: String) {
         guard let channel = getChannel(for: pid), let format = channel.currentFormat else { return }
-        
-        let docPath = "/Users/hassan/Media"
+
+        let dir = ensureRecordingsDirectory()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let dateStr = formatter.string(from: Date())
         let filename = "\(appName.replacingOccurrences(of: " ", with: "_"))_\(dateStr).wav"
-        let fileURL = URL(fileURLWithPath: docPath).appendingPathComponent(filename)
+        let fileURL = dir.appendingPathComponent(filename)
         
         do {
             let settings: [String: Any] = [

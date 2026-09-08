@@ -19,6 +19,7 @@ struct AudioMixerApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var dropdownWindow: NSPanel?
+    private var dropdownHostingView: NSHostingView<MenuBarDropdownView>?
     private var appState = AppState.shared
     private var eventMonitor: Any?
     private var appearanceObservation: NSKeyValueObservation?
@@ -73,11 +74,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = NSHostingView(rootView: MenuBarDropdownView())
         contentView.frame = effectView.bounds
         contentView.autoresizingMask = [.width, .height]
-        
+
         effectView.addSubview(contentView)
         window.contentView = effectView
-        
+
         self.dropdownWindow = window
+        self.dropdownHostingView = contentView
+    }
+
+    /// Resizes the panel to fit the SwiftUI content's current height (which
+    /// varies with the permission banner and number of apps), so the popover
+    /// never clips or shows dead space.
+    private func sizeDropdownToFit() {
+        guard let window = dropdownWindow, let hosting = dropdownHostingView else { return }
+        let width: CGFloat = 360
+        let fitting = hosting.fittingSize
+        let height = max(200, min(640, fitting.height))
+        window.setContentSize(NSSize(width: width, height: height))
     }
     
     @objc private func statusBarButtonClicked(_ sender: AnyObject?) {
@@ -86,6 +99,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if window.isVisible {
             closeDropdown()
         } else {
+            sizeDropdownToFit()
             let buttonFrame = button.window?.convertToScreen(button.frame) ?? .zero
             let windowFrame = window.frame
             
@@ -124,7 +138,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             context.duration = 0.15
             window.animator().alphaValue = 0.0
         } completionHandler: {
-            window.orderOut(nil)
+            MainActor.assumeIsolated { window.orderOut(nil) }
         }
     }
     
