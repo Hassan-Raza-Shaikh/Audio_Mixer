@@ -9,6 +9,9 @@ targets:
     sources:
       - path: Sources
       - path: Resources
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
     settings:
       base:
         INFOPLIST_FILE: Resources/Info.plist

@@ -48,3 +48,6 @@ Icon
 Packages/
 Package.pins
 Package.resolved
+
+# Local signing override (per-machine, created by scripts/setup-local-signing.sh)
+Local.xcconfig

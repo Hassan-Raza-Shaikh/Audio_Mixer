@@ -60,6 +60,30 @@ xcodebuild -project AudioMixer.xcodeproj -scheme AudioMixer -configuration Debug
 Or open `AudioMixer.xcodeproj` in Xcode and run. The built product is named
 **Aura.app** (bundle id `com.hassan.Aura`).
 
+### Stable local signing (so permissions stick)
+
+By default the app is signed **ad-hoc**, which works but re-signs on every build —
+so macOS treats each rebuild as a new app and you have to re-grant Screen
+Recording and Microphone every time.
+
+To sign with a stable self-signed identity instead (grant permissions once, and
+they persist across rebuilds), run the one-time setup:
+
+```bash
+./scripts/setup-local-signing.sh   # creates the "Aura Local Signing" identity
+xcodegen generate                  # (only needed if project.yml changed)
+xcodebuild -project AudioMixer.xcodeproj -scheme AudioMixer -configuration Debug build
+```
+
+The script creates a self-signed code-signing certificate in your login keychain
+and writes `Local.xcconfig` (git-ignored) pointing the build at it. After that,
+grant Screen Recording + Microphone to Aura **once** in
+*System Settings → Privacy & Security* — the grants survive future rebuilds
+because the code signature (and its designated requirement) stays constant.
+
+If you have an Apple Developer account, you can instead set `DEVELOPMENT_TEAM`
+and use automatic signing; that's equally stable.
+
 ## Project layout
 
 ```
