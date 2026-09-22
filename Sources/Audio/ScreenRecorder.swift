@@ -23,6 +23,12 @@ public final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendab
     /// Whether to include system audio in the recording. Set from the UI.
     @Published public var includeAudio = true
 
+    /// Folder where finished recordings are written. User-selectable and
+    /// remembered across launches.
+    @Published public private(set) var outputDirectory: URL = ScreenRecorder.loadOutputDirectory()
+
+    private static let outputDirDefaultsKey = "AuraScreenRecordingDirectory"
+
     private var stream: SCStream?
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -34,11 +40,24 @@ public final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendab
 
     private let writerQueue = DispatchQueue(label: "com.hassan.Aura.ScreenRecorder")
 
-    /// Directory where finished recordings are saved: ~/Movies/Aura Screen Recordings
-    public static var outputDirectory: URL {
+    /// Default directory: ~/Movies/Aura Screen Recordings
+    public static var defaultOutputDirectory: URL {
         let base = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies")
         return base.appendingPathComponent("Aura Screen Recordings", isDirectory: true)
+    }
+
+    private static func loadOutputDirectory() -> URL {
+        if let path = UserDefaults.standard.string(forKey: outputDirDefaultsKey), !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        return defaultOutputDirectory
+    }
+
+    /// Point future recordings at a new folder (persisted across launches).
+    public func setOutputDirectory(_ url: URL) {
+        outputDirectory = url
+        UserDefaults.standard.set(url.path, forKey: Self.outputDirDefaultsKey)
     }
 
     // MARK: - Public API
@@ -131,7 +150,7 @@ public final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendab
     // MARK: - Writer (writerQueue only, except setup which happens-before capture)
 
     private func setupWriter(width: Int, height: Int, withAudio: Bool) throws {
-        let dir = Self.outputDirectory
+        let dir = outputDirectory
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let formatter = DateFormatter()

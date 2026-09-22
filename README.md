@@ -29,8 +29,10 @@ can't capture.
 
 | What | Location |
 |------|----------|
-| Screen recordings | `~/Movies/Aura Screen Recordings/` |
+| Screen recordings | `~/Movies/Aura Screen Recordings/` (default — change it with the folder button next to the record control) |
 | Per-app audio recordings | `~/Music/Aura Recordings/` |
+
+The screen-recording destination is remembered across launches.
 
 ## Permissions
 

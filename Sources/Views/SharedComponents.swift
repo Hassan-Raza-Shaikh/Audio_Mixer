@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Device Symbols
 
@@ -105,7 +106,7 @@ struct ScreenRecordControl: View {
             HStack(spacing: 8) {
                 recordButton
                     .frame(maxWidth: .infinity)
-                if !recorder.isRecording { audioToggle }
+                if !recorder.isRecording { folderButton; audioToggle }
             }
         } else {
             HStack(spacing: 6) {
@@ -114,10 +115,36 @@ struct ScreenRecordControl: View {
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.red)
                 } else {
+                    folderButton
                     audioToggle
                 }
                 recordButton
             }
+        }
+    }
+
+    private var folderButton: some View {
+        Button(action: chooseFolder) {
+            Image(systemName: "folder")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+                .background(Color.primary.opacity(0.05), in: Circle())
+        }
+        .buttonStyle(.plain)
+        .help("Save recordings to: \(recorder.outputDirectory.path)\nClick to change")
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose where Aura saves screen recordings"
+        panel.directoryURL = recorder.outputDirectory
+        if panel.runModal() == .OK, let url = panel.url {
+            recorder.setOutputDirectory(url)
         }
     }
 
