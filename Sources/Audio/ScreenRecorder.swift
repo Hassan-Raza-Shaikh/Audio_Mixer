@@ -3,6 +3,7 @@ import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
 import AppKit
+import CoreGraphics
 
 /// Records the screen (video) and, optionally, all system audio into a single
 /// `.mov` file. This is the thing macOS won't do out of the box: a screen
@@ -49,6 +50,15 @@ public final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendab
     public func start() async {
         guard !isRecording else { return }
         let wantAudio = includeAudio
+
+        // Screen recording needs the Screen Recording TCC grant. If it's not
+        // effective for this binary, prompt/deep-link instead of failing
+        // silently so the record button doesn't just do nothing.
+        guard CGPreflightScreenCaptureAccess() else {
+            print("ScreenRecorder: Screen Recording permission not granted — prompting")
+            CGRequestScreenCaptureAccess()
+            return
+        }
 
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
