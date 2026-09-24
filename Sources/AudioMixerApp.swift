@@ -1,148 +1,87 @@
-import SwiftUI
 import AppKit
+import SwiftUI
 
 @main
-struct AudioMixerApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
+struct AuraApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     var body: some Scene {
-        WindowGroup("Aura", id: "spatial-studio") {
+        Window("Aura", id: "mixer") {
             MainWindowView()
-                .frame(minWidth: 600, minHeight: 450)
         }
         .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 860, height: 580)
+        // Opened explicitly by MenuBarLabel so a login-item launch stays quiet.
+        .defaultLaunchBehavior(.suppressed)
+
+        MenuBarExtra {
+            MenuBarDropdownView()
+        } label: {
+            MenuBarLabel()
+        }
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView()
+        }
+    }
+}
+
+/// The menu-bar icon. Shows a record symbol while a screen recording runs, and
+/// opens the mixer window on a normal (non–login item) launch.
+private struct MenuBarLabel: View {
+    @ObservedObject private var recorder = ScreenRecorder.shared
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(systemName: recorder.isRecording ? "record.circle" : "slider.horizontal.3")
+            .accessibilityLabel(recorder.isRecording ? "Aura – recording" : "Aura")
+            .task {
+                guard !AppDelegate.launchedAsLoginItem, !AppDelegate.didOpenInitialWindow else { return }
+                AppDelegate.didOpenInitialWindow = true
+                openWindow(id: "mixer")
+            }
     }
 }
 
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem?
-    private var dropdownWindow: NSPanel?
-    private var dropdownHostingView: NSHostingView<MenuBarDropdownView>?
-    private var appState = AppState.shared
-    private var eventMonitor: Any?
-    private var appearanceObservation: NSKeyValueObservation?
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var launchedAsLoginItem = false
+    static var didOpenInitialWindow = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        Self.launchedAsLoginItem = event?.eventID == kAEOpenApplication
+            && event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        #if DEBUG
+        if SelfTest.isRequested { Self.didOpenInitialWindow = true }
+        #endif
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        setupStatusItem()
-        setupDropdownWindow()
+        _ = AppState.shared     // start watching apps and devices right away
+        #if DEBUG
+        SelfTest.runIfRequested()
+        #endif
     }
-    
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false
-    }
-    
-    private func setupStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
-        guard let button = statusItem?.button else { return }
-        
-        if let image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "AudioMixer") {
-            image.isTemplate = true
-            button.image = image
-        }
-        
-        button.action = #selector(statusBarButtonClicked(_:))
-        button.target = self
-    }
-    
-    private func setupDropdownWindow() {
-        let window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 400),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: false
-        )
-        
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = true
-        window.level = .popUpMenu
-        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .fullScreenAuxiliary]
-        
-        // Native macOS 27 VisualEffectView for Menu Bar Dropdowns
-        let effectView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
-        effectView.material = .popover
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        // Keep corners rounded
-        effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 16
-        effectView.layer?.cornerCurve = .continuous
-        effectView.layer?.masksToBounds = true
-        
-        let contentView = NSHostingView(rootView: MenuBarDropdownView())
-        contentView.frame = effectView.bounds
-        contentView.autoresizingMask = [.width, .height]
-
-        effectView.addSubview(contentView)
-        window.contentView = effectView
-
-        self.dropdownWindow = window
-        self.dropdownHostingView = contentView
+        false   // keep living in the menu bar
     }
 
-    /// Resizes the panel to fit the SwiftUI content's current height (which
-    /// varies with the permission banner and number of apps), so the popover
-    /// never clips or shows dead space.
-    private func sizeDropdownToFit() {
-        guard let window = dropdownWindow, let hosting = dropdownHostingView else { return }
-        let width: CGFloat = 360
-        let fitting = hosting.fittingSize
-        let height = max(200, min(640, fitting.height))
-        window.setContentSize(NSSize(width: width, height: height))
-    }
-    
-    @objc private func statusBarButtonClicked(_ sender: AnyObject?) {
-        guard let button = statusItem?.button, let window = dropdownWindow else { return }
-        
-        if window.isVisible {
-            closeDropdown()
-        } else {
-            sizeDropdownToFit()
-            let buttonFrame = button.window?.convertToScreen(button.frame) ?? .zero
-            let windowFrame = window.frame
-            
-            let xPos = buttonFrame.origin.x + (buttonFrame.size.width / 2) - (windowFrame.size.width / 2)
-            let yPos = buttonFrame.origin.y - windowFrame.size.height - 4
-            
-            window.setFrameOrigin(NSPoint(x: xPos, y: yPos))
-            
-            window.alphaValue = 0.0
-            window.orderFront(nil)
-            
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.22
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().alphaValue = 1.0
-            }
-            
-            window.makeKey()
-            
-            // Monitor clicks outside the window to close it (native popover behavior)
-            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-                self?.closeDropdown()
-            }
+    /// Don't lose an in-progress screen recording on quit: finish the file first.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard ScreenRecorder.shared.isRecording else { return .terminateNow }
+        Task { @MainActor in
+            await ScreenRecorder.shared.stopAndSave()
+            sender.reply(toApplicationShouldTerminate: true)
         }
+        return .terminateLater
     }
-    
-    private func closeDropdown() {
-        guard let window = dropdownWindow, window.isVisible else { return }
-        
-        if let monitor = eventMonitor {
-            NSEvent.removeMonitor(monitor)
-            eventMonitor = nil
-        }
-        
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
-            window.animator().alphaValue = 0.0
-        } completionHandler: {
-            MainActor.assumeIsolated { window.orderOut(nil) }
-        }
-    }
-    
-    func applicationDidResignActive(_ notification: Notification) {
-        closeDropdown()
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Hand every app's audio back to macOS and close any open recordings.
+        AudioRouter.shared.stopAll()
     }
 }

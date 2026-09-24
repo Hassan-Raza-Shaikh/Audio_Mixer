@@ -1,19 +1,26 @@
 // Code-signing configuration for Aura.
 //
-// By default the app is signed ad-hoc ("-"), which always works but means
-// macOS re-issues a new signature on every rebuild — so TCC permissions
-// (Screen Recording, Microphone) have to be re-granted each time.
+// Defaults to ad-hoc signing ("-") so a fresh clone always builds. Override per
+// machine in Local.xcconfig (git-ignored) — see Local.xcconfig.example:
 //
-// To make permissions stick across rebuilds, run:
-//     ./scripts/setup-local-signing.sh
-// It creates a stable self-signed identity ("Aura Local Signing") and writes
-// Local.xcconfig (git-ignored) overriding AURA_CODE_SIGN_IDENTITY below.
+//   • Local development with stable permissions (no Apple account needed):
+//       ./scripts/setup-local-signing.sh
+//     creates a self-signed "Aura Local Signing" identity and writes
+//     Local.xcconfig for you, so Screen & System Audio Recording grants survive
+//     rebuilds.
+//
+//   • App Store / TestFlight (Apple Developer Program):
+//       AURA_CODE_SIGN_STYLE = Automatic
+//       AURA_CODE_SIGN_IDENTITY = Apple Development
+//       AURA_DEVELOPMENT_TEAM = <your 10-character Team ID>
+//     then Product › Archive in Xcode and Distribute App › App Store Connect.
 
+AURA_CODE_SIGN_STYLE = Manual
 AURA_CODE_SIGN_IDENTITY = -
+AURA_DEVELOPMENT_TEAM =
 
-// Optional per-machine override (created by the setup script). Keeps the
-// identity name out of version control.
 #include? "Local.xcconfig"
 
-CODE_SIGN_STYLE = Manual
+CODE_SIGN_STYLE = $(AURA_CODE_SIGN_STYLE)
 CODE_SIGN_IDENTITY = $(AURA_CODE_SIGN_IDENTITY)
+DEVELOPMENT_TEAM = $(AURA_DEVELOPMENT_TEAM)

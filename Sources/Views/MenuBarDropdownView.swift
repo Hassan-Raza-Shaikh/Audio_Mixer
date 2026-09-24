@@ -1,55 +1,50 @@
 import SwiftUI
 
-// MARK: - Menu Bar Dropdown
-
-public struct MenuBarDropdownView: View {
+/// Content of the menu-bar extra: a compact mixer plus the screen recorder.
+struct MenuBarDropdownView: View {
     @ObservedObject var state = AppState.shared
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openSettings) private var openSettings
 
-    public init() {}
+    private var displayApps: [AudioApp] { state.visibleApps }
 
-    private var displayApps: [AudioApp] {
-        state.showAllApps ? state.apps : state.visibleApps
-    }
-
-    public var body: some View {
+    var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.4)
 
-            if !state.hasCapturePermission {
-                PermissionBanner()
-                    .padding(.horizontal, 12)
-                    .padding(.top, 10)
+            VStack(spacing: 8) {
+                if state.audioAccessLikelyDenied { AudioAccessBanner() }
+                if let notice = state.notice { NoticeBanner(notice: notice) }
             }
+            .padding(.horizontal, 12)
+            .padding(.top, state.audioAccessLikelyDenied || state.notice != nil ? 10 : 0)
+            .animation(.easeOut(duration: 0.2), value: state.notice)
 
             filterBar
 
             if displayApps.isEmpty {
                 emptyState
             } else {
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 4) {
-                        ForEach(displayApps) { app in
-                            appRow(app)
-                        }
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(displayApps) { app in appRow(app) }
                     }
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .padding(.bottom, 4)
                 }
-                .frame(maxHeight: 320)
+                .scrollIndicators(.automatic)
+                .frame(maxHeight: 340)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             Divider().opacity(0.4)
-
             ScreenRecordControl(wide: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 12)
                 .padding(.top, 10)
-
             footer
         }
         .frame(width: 360)
-        .background(Color.clear)
     }
 
     // MARK: - Header
@@ -59,27 +54,22 @@ public struct MenuBarDropdownView: View {
             Image(systemName: "slider.horizontal.3")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
-            Text("Aura")
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-
+                .accessibilityHidden(true)
+            Text("Aura").font(.system(size: 14, weight: .bold, design: .rounded))
             Spacer()
-
-            if let dev = state.defaultDevice {
+            if let current = state.defaultDevice {
                 Menu {
-                    Text("System Output")
-                    Divider()
-                    ForEach(state.devices) { device in
-                        Button {
-                            AudioDeviceManager.shared.setDefaultOutputDevice(deviceID: device)
-                            state.refreshDevices()
-                        } label: {
-                            Label(device.name, systemImage: device.isDefault ? "checkmark" : deviceSymbol(for: device.name))
-                        }
+                    Picker("System Output", selection: Binding(
+                        get: { current.id },
+                        set: { uid in if let d = state.devices.first(where: { $0.id == uid }) { state.setSystemOutput(d) } }
+                    )) {
+                        ForEach(state.devices) { Text($0.name).tag($0.id) }
                     }
+                    .pickerStyle(.inline)
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: deviceSymbol(for: dev.name)).font(.system(size: 9))
-                        Text(dev.shortName).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                        Image(systemName: deviceSymbol(for: current.name)).font(.system(size: 9))
+                        Text(current.shortName).font(.system(size: 10, weight: .medium)).lineLimit(1)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(Color.accentColor.opacity(0.1), in: Capsule())
@@ -87,122 +77,90 @@ public struct MenuBarDropdownView: View {
                 }
                 .menuStyle(.button)
                 .buttonStyle(.plain)
+                .menuIndicator(.hidden)
                 .fixedSize()
+                .help("System output device")
+                .accessibilityLabel("System output: \(current.name)")
             }
         }
         .padding(.horizontal, 14)
-        .padding(.top, 14)
+        .padding(.top, 12)
         .padding(.bottom, 10)
     }
 
-    // MARK: - Filter bar
+    // MARK: - Filter
 
     private var filterBar: some View {
         HStack {
-            Picker("", selection: $state.showAllApps) {
-                Text("Audio apps").tag(false)
-                Text("All apps").tag(true)
+            Picker("Show", selection: $state.showAllApps) {
+                Text("Audio Apps").tag(false)
+                Text("All Apps").tag(true)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 180)
-
+            .frame(width: 190)
             Spacer()
-
             Button {
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { state.resetToDefaults() }
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { state.resetAll() }
             } label: {
-                Image(systemName: "arrow.counterclockwise")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                Image(systemName: "arrow.counterclockwise").font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.plain)
-            .help("Reset all volumes, mutes and routes")
+            .foregroundStyle(.secondary)
+            .help("Reset every app to its normal audio")
+            .accessibilityLabel("Reset all apps")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
     }
 
-    // MARK: - App Row
+    // MARK: - Row
 
-    @ViewBuilder
     private func appRow(_ app: AudioApp) -> some View {
         HStack(spacing: 10) {
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(app.accentColor.opacity(0.1))
-                    .frame(width: 34, height: 34)
-                if let icon = app.icon {
-                    Image(nsImage: icon).resizable().aspectRatio(contentMode: .fit).frame(width: 24, height: 24)
-                } else {
-                    Image(systemName: "app.fill").font(.system(size: 15)).foregroundStyle(app.accentColor)
+            AppIconView(app: app, size: 34)
+                .overlay(alignment: .bottomTrailing) {
+                    if app.isPlaying {
+                        PlayingIndicator(isPlaying: true, color: app.accentColor)
+                            .padding(2)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+                            .offset(x: 4, y: 4)
+                    }
                 }
-                if AudioCaptureEngine.shared.isCapturing(pid: app.pid) && !app.isMuted {
-                    LevelBars(pid: app.pid, color: app.accentColor)
-                        .frame(width: 12, height: 8)
-                        .padding(2)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
-                        .offset(x: 4, y: 4)
-                }
-            }
 
-            VStack(alignment: .leading, spacing: 5) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Text(app.name)
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .lineLimit(1)
-                    Spacer()
-                    devicePicker(for: app)
+                    if app.isRecording {
+                        Image(systemName: "record.circle.fill").font(.system(size: 9)).foregroundStyle(.red)
+                            .accessibilityLabel("Recording")
+                    }
+                    Spacer(minLength: 4)
+                    OutputDeviceMenu(app: app)
                 }
-
                 HStack(spacing: 8) {
                     VolumeSlider(app: app)
-
-                    Text("\(Int(app.volume * 100))")
+                    Text("\(Int((app.volume * 100).rounded()))")
                         .font(.system(size: 10, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .frame(width: 24, alignment: .trailing)
-
-                    Button {
+                        .frame(width: 26, alignment: .trailing)
+                        .accessibilityHidden(true)
+                    CircleIconButton(systemImage: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                                     label: app.isMuted ? "Unmute \(app.name)" : "Mute \(app.name)",
+                                     isActive: app.isMuted, size: 22) {
                         withAnimation(.bouncy(duration: 0.3)) { state.toggleMute(for: app) }
-                    } label: {
-                        Image(systemName: app.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(app.isMuted ? Color.red : Color.secondary)
-                            .frame(width: 20, height: 20)
-                            .background(Color.primary.opacity(app.isMuted ? 0.1 : 0.05), in: Circle())
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
         .padding(8)
-        .background(Color.primary.opacity(0.02), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    @ViewBuilder
-    private func devicePicker(for app: AudioApp) -> some View {
-        Menu {
-            ForEach(state.devices) { device in
-                Button {
-                    withAnimation(.bouncy) { state.setOutputDevice(for: app, to: device) }
-                } label: {
-                    Label(device.name, systemImage: app.outputDevice.id == device.id ? "checkmark" : deviceSymbol(for: device.name))
-                }
-            }
-        } label: {
-            HStack(spacing: 3) {
-                Image(systemName: deviceSymbol(for: app.outputDevice.name)).font(.system(size: 8))
-                Text(app.outputDevice.shortName).font(.system(size: 9, weight: .medium)).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 6, weight: .bold))
-            }
-            .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-            .foregroundStyle(.secondary)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contextMenu {
+            Button(app.isRecording ? "Stop Recording \(app.name)" : "Record \(app.name)’s Audio") { state.toggleRecording(for: app) }
+            Button("Reset \(app.name)") { state.resetChannel(for: app) }
         }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .fixedSize()
     }
 
     // MARK: - Empty state
@@ -212,11 +170,11 @@ public struct MenuBarDropdownView: View {
             Image(systemName: "speaker.wave.2.circle")
                 .font(.system(size: 30))
                 .foregroundStyle(.secondary.opacity(0.4))
-            Text(state.showAllApps ? "No running apps" : "No audio apps running")
+            Text(state.showAllApps ? "No running apps" : "No apps using audio yet")
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
             if !state.showAllApps {
-                Text("Playing something in Spotify, a browser, or a video app? It'll show up here.")
+                Text("Play something in Music, Spotify, a browser or a video app and it’ll appear here.")
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
@@ -224,42 +182,36 @@ public struct MenuBarDropdownView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 40)
+        .padding(.vertical, 32)
     }
 
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 8) {
             Button {
-                openWindow(id: "spatial-studio")
-                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "mixer")
+                NSApp.activate()
             } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "square.grid.2x2").font(.system(size: 10))
-                    Text("Open Mixer").font(.system(size: 11, weight: .semibold))
-                }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .foregroundStyle(Color.accentColor)
+                Label("Open Mixer", systemImage: "square.grid.2x2")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .foregroundStyle(Color.accentColor)
             }
             .buttonStyle(.plain)
 
             Spacer()
 
-            Button { NSApplication.shared.terminate(nil) } label: {
-                Image(systemName: "power")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(Color.red.opacity(0.8))
-                    .padding(6)
-                    .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+            CircleIconButton(systemImage: "gearshape", label: "Settings", size: 26) {
+                openSettings()
+                NSApp.activate()
             }
-            .buttonStyle(.plain)
-            .help("Quit Aura")
+            CircleIconButton(systemImage: "power", label: "Quit Aura", isActive: true, size: 26) {
+                NSApplication.shared.terminate(nil)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 }
-
-#Preview { MenuBarDropdownView() }

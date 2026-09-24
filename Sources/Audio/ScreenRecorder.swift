@@ -1,286 +1,360 @@
-import Foundation
-import ScreenCaptureKit
-import AVFoundation
-import CoreMedia
+@preconcurrency import AVFoundation
 import AppKit
 import CoreGraphics
+import CoreMedia
+import ScreenCaptureKit
+import os
 
-/// Records the screen (video) and, optionally, all system audio into a single
-/// `.mov` file. This is the thing macOS won't do out of the box: a screen
-/// recording with the sound you actually hear baked in.
+/// Records the screen and, optionally, everything you hear into one `.mov` —
+/// the thing a built-in macOS screen recording can't do.
 ///
-/// ScreenCaptureKit feeds raw video frames and PCM audio; an `AVAssetWriter`
-/// muxes them into one H.264 + AAC movie. Published properties are updated on
-/// the main queue for SwiftUI; the writer and its inputs are only ever touched
-/// on `writerQueue`, which is also the sample-handler queue.
-public final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
-    public static let shared = ScreenRecorder()
+/// ScreenCaptureKit delivers the video frames and `SystemAudioCapture` the
+/// audio (exactly what you hear, even while Aura is adjusting apps); an
+/// AVAssetWriter muxes them (H.264 or HEVC + AAC). Published properties change
+/// on the main thread; the writer and its inputs are only touched on
+/// `writerQueue`, which is also the queue ScreenCaptureKit delivers frames on.
+final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
+    static let shared = ScreenRecorder()
 
-    @Published public private(set) var isRecording = false
-    @Published public private(set) var elapsed: TimeInterval = 0
-    @Published public private(set) var lastOutputURL: URL?
+    @Published private(set) var isRecording = false
+    @Published private(set) var isStarting = false
+    @Published private(set) var elapsed: TimeInterval = 0
+    @Published private(set) var lastOutputURL: URL?
 
-    /// Whether to include system audio in the recording. Set from the UI.
-    @Published public var includeAudio = true
+    /// Whether system audio is included. Remembered across launches.
+    @Published var includeAudio: Bool = UserDefaults.standard.object(forKey: "ScreenRecordingIncludesAudio") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(includeAudio, forKey: "ScreenRecordingIncludesAudio") }
+    }
 
-    /// Folder where finished recordings are written. User-selectable and
-    /// remembered across launches.
-    @Published public private(set) var outputDirectory: URL = ScreenRecorder.loadOutputDirectory()
-
-    private static let outputDirDefaultsKey = "AuraScreenRecordingDirectory"
-
-    private var stream: SCStream?
-    private var writer: AVAssetWriter?
-    private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
-    private var sessionStarted = false
-
-    private var startWallClock: Date?
+    private let log = Logger(subsystem: "com.hassan.Aura", category: "screen-recorder")
+    private var stream: SCStream?                   // main thread
+    private var systemAudio: SystemAudioCapture?    // main thread
     private var timer: Timer?
+    private var startDate: Date?
 
-    private let writerQueue = DispatchQueue(label: "com.hassan.Aura.ScreenRecorder")
+    private let writerQueue = DispatchQueue(label: "com.hassan.Aura.screen-recorder")
+    private var writer: AVAssetWriter?              // writerQueue
+    private var videoInput: AVAssetWriterInput?     // writerQueue
+    private var audioInput: AVAssetWriterInput?     // writerQueue
+    private var sessionStarted = false              // writerQueue
+    private var isFinishing = false                 // writerQueue
 
-    /// Default directory: ~/Movies/Aura Screen Recordings
-    public static var defaultOutputDirectory: URL {
-        let base = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies")
-        return base.appendingPathComponent("Aura Screen Recordings", isDirectory: true)
-    }
-
-    private static func loadOutputDirectory() -> URL {
-        if let path = UserDefaults.standard.string(forKey: outputDirDefaultsKey), !path.isEmpty {
-            return URL(fileURLWithPath: path, isDirectory: true)
+    enum RecorderError: LocalizedError {
+        case noDisplay, cannotAddVideo
+        var errorDescription: String? {
+            switch self {
+            case .noDisplay: "No display is available to record."
+            case .cannotAddVideo: "The video encoder couldn't be set up."
+            }
         }
-        return defaultOutputDirectory
     }
 
-    /// Point future recordings at a new folder (persisted across launches).
-    public func setOutputDirectory(_ url: URL) {
-        outputDirectory = url
-        UserDefaults.standard.set(url.path, forKey: Self.outputDirDefaultsKey)
-    }
+    // MARK: - Public API (main thread)
 
-    // MARK: - Public API
-
-    public func toggle() {
+    @MainActor
+    func toggle() {
         if isRecording { stop() } else { Task { await start() } }
     }
 
-    public func start() async {
-        guard !isRecording else { return }
-        let wantAudio = includeAudio
-
-        // Screen recording needs the Screen Recording TCC grant. If it's not
-        // effective for this binary, prompt/deep-link instead of failing
-        // silently so the record button doesn't just do nothing.
+    @MainActor
+    func start() async {
+        guard !isRecording, !isStarting else { return }
         guard CGPreflightScreenCaptureAccess() else {
-            print("ScreenRecorder: Screen Recording permission not granted — prompting")
-            CGRequestScreenCaptureAccess()
+            // The first request shows the system prompt; after a denial macOS
+            // won't ask again, so point the user at System Settings.
+            if !CGRequestScreenCaptureAccess() {
+                AppState.shared.showNotice("Allow Aura under Privacy & Security › Screen & System Audio Recording, then try again.")
+                Self.openScreenRecordingSettings()
+            }
             return
         }
 
+        isStarting = true
+        defer { isStarting = false }
+        let wantAudio = includeAudio
+
         do {
+            let url = try RecordingLocation.screen.newFileURL(named: "Screen Recording \(RecordingLocation.timestamp())",
+                                                                extension: "mov")
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = content.displays.first else {
-                print("ScreenRecorder: no display available")
-                return
-            }
+            guard let (display, scale) = preferredDisplay(in: content) else { throw RecorderError.noDisplay }
 
-            // Exclude Aura's own windows so the mixer UI isn't in the shot and
-            // our own playback isn't double-captured in the audio track.
-            let auraApp = content.applications.first { $0.bundleIdentifier == "com.hassan.Aura" }
-            let filter = SCContentFilter(display: display,
-                                         excludingApplications: auraApp.map { [$0] } ?? [],
-                                         exceptingWindows: [])
+            // Hide Aura's own windows from the video.
+            let ownPID = ProcessInfo.processInfo.processIdentifier
+            let ownWindows = content.windows.filter { $0.owningApplication?.processID == ownPID }
+            let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
 
-            let scale = Self.displayScaleFactor(for: display)
-            let pixelWidth = Int(CGFloat(display.width) * scale)
-            let pixelHeight = Int(CGFloat(display.height) * scale)
+            // Encoders need even dimensions.
+            let width = Int(CGFloat(display.width) * scale) & ~1
+            let height = Int(CGFloat(display.height) * scale) & ~1
 
+            // Video only: audio comes from SystemAudioCapture (see its docs for
+            // why ScreenCaptureKit's audio is wrong while Aura routes apps).
             let config = SCStreamConfiguration()
-            config.width = pixelWidth
-            config.height = pixelHeight
+            config.width = width
+            config.height = height
             config.pixelFormat = kCVPixelFormatType_32BGRA
             config.showsCursor = true
             config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
             config.queueDepth = 6
-            if wantAudio {
-                config.capturesAudio = true
-                config.sampleRate = 48_000
-                config.channelCount = 2
-            }
 
-            try setupWriter(width: pixelWidth, height: pixelHeight, withAudio: wantAudio)
+            var audioCapture: SystemAudioCapture?
+            if wantAudio {
+                let router = AudioRouter.shared
+                let capture = SystemAudioCapture(excluding: router.routedProcessObjects) { [weak self] sampleBuffer in
+                    self?.appendAudio(sampleBuffer)
+                }
+                try capture.start()
+                router.onRoutesChanged = { [weak capture] in
+                    capture?.updateExclusions(AudioRouter.shared.routedProcessObjects)
+                }
+                audioCapture = capture
+            }
+            self.systemAudio = audioCapture
+
+            try await prepareWriter(url: url, width: width, height: height, audioSampleRate: audioCapture?.sampleRate)
 
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: writerQueue)
-            if wantAudio {
-                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: writerQueue)
-            }
             try await stream.startCapture()
-            self.stream = stream
 
-            await MainActor.run {
-                self.isRecording = true
-                self.startWallClock = Date()
-                self.startTimer()
-            }
-            print("ScreenRecorder: recording \(pixelWidth)x\(pixelHeight), audio=\(wantAudio)")
+            self.stream = stream
+            isRecording = true
+            startDate = Date()
+            startTimer()
+            log.info("Recording \(width)x\(height) audio=\(wantAudio) → \(url.lastPathComponent, privacy: .public)")
         } catch {
-            print("ScreenRecorder: failed to start — \(error.localizedDescription)")
-            try? await stream?.stopCapture()
-            stream = nil
-            writerQueue.async { self.cancelWriterLocked() }
+            log.error("Couldn't start recording: \(error.localizedDescription, privacy: .public)")
+            stopSystemAudio()
+            _ = await finishWriting()
+            AppState.shared.showNotice("Couldn't start screen recording: \(error.localizedDescription)")
         }
     }
 
-    public func stop() {
+    @MainActor
+    private func stopSystemAudio() {
+        AudioRouter.shared.onRoutesChanged = nil
+        systemAudio?.stop()
+        systemAudio = nil
+    }
+
+    @MainActor
+    func stop() {
+        Task { await stopAndSave() }
+    }
+
+    /// Stops capturing and waits until the movie file is finalized.
+    @MainActor
+    func stopAndSave() async {
         guard isRecording else { return }
         isRecording = false
         stopTimer()
-
         let stream = self.stream
         self.stream = nil
-        Task {
-            try? await stream?.stopCapture()
-            await finishWriting()
+
+        try? await stream?.stopCapture()
+        stopSystemAudio()
+        if let url = await finishWriting() {
+            lastOutputURL = url
+            AppState.shared.showNotice("Saved “\(url.lastPathComponent)”", reveal: url)
+        } else {
+            AppState.shared.showNotice("The screen recording couldn't be saved.")
         }
     }
 
-    // MARK: - Writer (writerQueue only, except setup which happens-before capture)
+    static func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
-    private func setupWriter(width: Int, height: Int, withAudio: Bool) throws {
-        let dir = outputDirectory
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    // MARK: - Writer
 
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let url = dir.appendingPathComponent("Screen Recording \(formatter.string(from: Date())).mov")
+    /// `audioSampleRate == nil` means video only.
+    private func prepareWriter(url: URL, width: Int, height: Int, audioSampleRate: Double?) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            writerQueue.async { [self] in
+                // H.264 plays everywhere but tops out at 4096×2304; use HEVC beyond that.
+                let useHEVC = width > 4096 || height > 2304
+                let videoSettings: [String: Any] = [
+                    AVVideoCodecKey: useHEVC ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
+                    AVVideoWidthKey: width,
+                    AVVideoHeightKey: height,
+                    AVVideoCompressionPropertiesKey: [
+                        AVVideoAverageBitRateKey: width * height * 3,      // crisp text without huge files
+                        AVVideoExpectedSourceFrameRateKey: 60,
+                        AVVideoMaxKeyFrameIntervalKey: 120,
+                    ],
+                ]
+                // AAC at the capture's own rate (the output device's), so no resampling.
+                let audioSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVNumberOfChannelsKey: 2,
+                    AVSampleRateKey: audioSampleRate ?? 48_000,
+                    AVEncoderBitRateKey: 192_000,
+                ]
+                do {
+                    let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+                    let video = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+                    video.expectsMediaDataInRealTime = true
+                    guard writer.canAdd(video) else { throw RecorderError.cannotAddVideo }
+                    writer.add(video)
 
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+                    var audioInput: AVAssetWriterInput?
+                    if audioSampleRate != nil {
+                        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                        input.expectsMediaDataInRealTime = true
+                        if writer.canAdd(input) {
+                            writer.add(input)
+                            audioInput = input
+                        }
+                    }
 
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-        ])
-        videoInput.expectsMediaDataInRealTime = true
-        guard writer.canAdd(videoInput) else { throw RecorderError.cannotAddInput }
-        writer.add(videoInput)
-
-        if withAudio {
-            let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVNumberOfChannelsKey: 2,
-                AVSampleRateKey: 48_000,
-                AVEncoderBitRateKey: 128_000,
-            ])
-            audioInput.expectsMediaDataInRealTime = true
-            if writer.canAdd(audioInput) {
-                writer.add(audioInput)
-                self.audioInput = audioInput
+                    self.writer = writer
+                    self.videoInput = video
+                    self.audioInput = audioInput
+                    self.sessionStarted = false
+                    self.isFinishing = false
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
-
-        self.writer = writer
-        self.videoInput = videoInput
-        self.sessionStarted = false
-        DispatchQueue.main.async { self.lastOutputURL = url }
     }
 
-    private func cancelWriterLocked() {
-        writer?.cancelWriting()
+    /// Finalizes the movie. Returns its URL, or nil if nothing usable was
+    /// written (in which case the empty file is removed).
+    private func finishWriting() async -> URL? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            writerQueue.async { [self] in
+                isFinishing = true
+                guard let writer else {
+                    resetWriter()
+                    continuation.resume(returning: nil)
+                    return
+                }
+                guard sessionStarted, writer.status == .writing else {
+                    writer.cancelWriting()
+                    try? FileManager.default.removeItem(at: writer.outputURL)
+                    resetWriter()
+                    continuation.resume(returning: nil)
+                    return
+                }
+                videoInput?.markAsFinished()
+                audioInput?.markAsFinished()
+                writer.finishWriting { [self] in
+                    // Completion arrives on an arbitrary thread; read the writer back on its queue.
+                    writerQueue.async {
+                        let finished = self.writer
+                        let url = finished?.status == .completed ? finished?.outputURL : nil
+                        if url == nil {
+                            self.log.error("Writer failed: \(finished?.error?.localizedDescription ?? "unknown", privacy: .public)")
+                        }
+                        self.resetWriter()
+                        continuation.resume(returning: url)
+                    }
+                }
+            }
+        }
+    }
+
+    private func resetWriter() {
         writer = nil
         videoInput = nil
         audioInput = nil
         sessionStarted = false
+        isFinishing = false
     }
 
-    private func finishWriting() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            writerQueue.async { [weak self] in
-                guard let self, let writer = self.writer, writer.status == .writing else {
-                    self?.cancelWriterLocked()
-                    continuation.resume(); return
-                }
-                self.videoInput?.markAsFinished()
-                self.audioInput?.markAsFinished()
-                let url = writer.outputURL
-                writer.finishWriting {
-                    DispatchQueue.main.async {
-                        self.lastOutputURL = url
-                        print("ScreenRecorder: saved \(url.lastPathComponent)")
-                    }
-                    self.writer = nil
-                    self.videoInput = nil
-                    self.audioInput = nil
-                    self.sessionStarted = false
-                    continuation.resume()
-                }
-            }
+    // MARK: - Helpers
+
+    @MainActor
+    private func preferredDisplay(in content: SCShareableContent) -> (SCDisplay, CGFloat)? {
+        // Record the screen the user is working on (where the pointer is).
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        let screenID = screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        guard let display = content.displays.first(where: { $0.displayID == screenID }) ?? content.displays.first else {
+            return nil
         }
+        return (display, screen?.backingScaleFactor ?? 2)
     }
-
-    // MARK: - Timer (main)
 
     @MainActor
     private func startTimer() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let start = self.startWallClock else { return }
+                guard let self, let start = self.startDate else { return }
                 self.elapsed = Date().timeIntervalSince(start)
             }
         }
     }
 
+    @MainActor
     private func stopTimer() {
         timer?.invalidate()
         timer = nil
         elapsed = 0
-        startWallClock = nil
+        startDate = nil
     }
 
-    private static func displayScaleFactor(for display: SCDisplay) -> CGFloat {
-        NSScreen.screens.first {
-            ($0.deviceDescription[.init("NSScreenNumber")] as? CGDirectDisplayID) == display.displayID
-        }?.backingScaleFactor ?? 2.0
+    /// ScreenCaptureKit also emits "idle" frames (nothing changed) that carry no
+    /// image; appending one would fail the writer, so only keep complete frames.
+    private static func isCompleteFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                as? [[SCStreamFrameInfo: Any]],
+              let rawStatus = attachments.first?[.status] as? Int,
+              let status = SCFrameStatus(rawValue: rawStatus) else { return false }
+        return status == .complete
     }
-
-    enum RecorderError: Error { case cannotAddInput }
 }
 
-// MARK: - SCStreamOutput / Delegate
+// MARK: - SCStreamOutput / SCStreamDelegate
 
 extension ScreenRecorder: SCStreamOutput, SCStreamDelegate {
-    // Called on `writerQueue` (the sample-handler queue we registered), so it
-    // may touch writer state directly without hopping actors.
-    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard CMSampleBufferDataIsReady(sampleBuffer), let writer = self.writer else { return }
-
-        if writer.status == .unknown {
-            // Start the session on the first video frame so audio-only samples
-            // that arrive early don't anchor the timeline before there's video.
-            guard type == .screen else { return }
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            writer.startWriting()
-            writer.startSession(atSourceTime: pts)
-            sessionStarted = true
-        }
-
-        guard writer.status == .writing, sessionStarted else { return }
+    // Runs on `writerQueue`.
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard sampleBuffer.isValid, !isFinishing, let writer else { return }
 
         switch type {
         case .screen:
-            if let input = videoInput, input.isReadyForMoreMediaData { input.append(sampleBuffer) }
-        case .audio:
-            if let input = audioInput, input.isReadyForMoreMediaData { input.append(sampleBuffer) }
+            guard Self.isCompleteFrame(sampleBuffer) else { return }
+            if !sessionStarted {
+                // Anchor the timeline on the first real video frame.
+                guard writer.startWriting() else { return }
+                writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
+                sessionStarted = true
+            }
+            if writer.status == .writing, let input = videoInput, input.isReadyForMoreMediaData {
+                input.append(sampleBuffer)
+            }
         default:
             break
         }
     }
 
-    public func stream(_ stream: SCStream, didStopWithError error: Error) {
-        print("ScreenRecorder: stream stopped — \(error.localizedDescription)")
-        Task { @MainActor in if self.isRecording { self.stop() } }
+    /// Called from SystemAudioCapture's IO thread; hops to the writer queue.
+    fileprivate func appendAudio(_ sampleBuffer: CMSampleBuffer) {
+        let buffer = UncheckedSendable(value: sampleBuffer)
+        writerQueue.async { [self] in
+            // Audio before the first video frame is dropped: the timeline starts there.
+            guard !isFinishing, sessionStarted, let writer, writer.status == .writing,
+                  let input = audioInput, input.isReadyForMoreMediaData else { return }
+            input.append(buffer.value)
+        }
     }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        log.error("Stream stopped: \(error.localizedDescription, privacy: .public)")
+        Task { @MainActor in
+            if self.isRecording { self.stop() }
+        }
+    }
+}
+
+/// Carries a value across a concurrency boundary where ownership is handed
+/// off rather than shared (e.g. a sample buffer from an audio thread to a queue).
+struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
 }

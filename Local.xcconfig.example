@@ -1,0 +1,10 @@
+// Copy to Local.xcconfig (git-ignored) and pick ONE option.
+
+// Option A — local development with a stable self-signed identity.
+// (scripts/setup-local-signing.sh writes this for you.)
+AURA_CODE_SIGN_IDENTITY = Aura Local Signing
+
+// Option B — App Store / TestFlight with your Apple Developer team.
+// AURA_CODE_SIGN_STYLE = Automatic
+// AURA_CODE_SIGN_IDENTITY = Apple Development
+// AURA_DEVELOPMENT_TEAM = ABCDE12345

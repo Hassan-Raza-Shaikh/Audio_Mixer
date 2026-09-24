@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Aura</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,18 +17,22 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<false/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Aura needs audio-recording access to tap individual apps' audio so it can adjust their volume and route them to different output devices.</string>
-	<key>NSScreenCaptureUsageDescription</key>
-	<string>Aura uses Screen Recording only to capture application audio when the modern audio-tap path is unavailable. It never records your screen.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Hassan Raza Shaikh</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Aura captures the audio of apps you adjust so it can change their volume, balance and output device, and record them when you ask. Audio never leaves your Mac.</string>
 </dict>
 </plist>
