@@ -2,117 +2,124 @@
 
 A native macOS per-app audio mixer and screen recorder.
 
-Aura gives every running app its own volume, mute, stereo balance, and output
-device — the per-app audio control macOS doesn't offer on its own — and it can
-record the screen **with system audio**, which a normal QuickTime recording
-can't capture.
+Aura gives every app its own volume, mute, stereo balance and output device —
+the per-app audio control macOS doesn't offer on its own — and it records the
+screen **with the sound you actually hear**, which a normal macOS screen
+recording can't do.
 
-> Requires macOS 14.4+ (built against the macOS 26 SDK, Swift 6). Menu-bar app
-> with an optional main window.
+> macOS 26 or later · Swift 6 · App Sandbox · universal (Apple silicon + Intel).
+> Lives in the menu bar, with an optional mixer window.
 
 ## Features
 
-- **Per-app mixer** — adjust volume, mute, and stereo balance for each running
-  app independently, from a menu-bar dropdown or a full window.
-- **Per-app output routing** — send one app to your speakers and another to
-  headphones at the same time.
-- **True capture, no double audio** — uses the Core Audio *process-tap* API to
-  tap an app's audio while muting its original output, so you don't hear it
-  twice. Falls back to ScreenCaptureKit automatically if a tap can't be set up.
-- **Screen recording with audio** — one click records the screen and all system
-  audio into a single `.mov` (H.264 + AAC). A toggle turns the audio on/off.
-- **Spatial soundstage** (secondary) — drag apps around a 2D radar to set their
-  volume and balance by position.
-- **Per-app recording** (secondary) — capture a single app's audio to a `.wav`.
+- **Per-app mixer** — volume, mute and balance for each app, from the menu bar
+  or the mixer window. Untouched apps aren't processed at all.
+- **Per-app output** — send one app to your speakers and another to headphones.
+  "System Default" follows macOS when you plug in or unplug a device.
+- **Works with browsers and Electron apps** — Aura controls an app's whole audio
+  process tree (Chrome, Edge, Teams, Discord, Spotify, … play sound from helper
+  processes; Safari from WebKit's GPU process).
+- **Screen recording with audio** — one click records the screen and everything
+  you hear into a single `.mov` (H.264/HEVC + AAC). Toggle audio on or off.
+- **App audio recording** — save a single app's audio to a WAV file.
+- **Spatial soundstage** — drag apps on a 2D stage to set volume and balance.
+- **Launch at login**, remembered recording folders, full VoiceOver support.
 
 ## Where files are saved
 
-| What | Location |
-|------|----------|
-| Screen recordings | `~/Movies/Aura Screen Recordings/` (default — change it with the folder button next to the record control) |
-| Per-app audio recordings | `~/Music/Aura Recordings/` |
+| What | Default location | Change it |
+|------|------------------|-----------|
+| Screen recordings | `~/Movies/Aura Screen Recordings/` | Folder button next to Record, or Settings |
+| App audio recordings | `~/Music/Aura Recordings/` | Settings |
 
-The screen-recording destination is remembered across launches.
+Chosen folders are remembered with security-scoped bookmarks (App Sandbox).
 
 ## Permissions
 
-Aura needs one or both of these, depending on what you use. It surfaces an
-in-app banner with a **Grant** button when access is missing.
+Both live under **System Settings → Privacy & Security → Screen & System Audio
+Recording**. Aura asks only when a feature first needs them.
 
-- **Audio Recording** (Microphone) — required by the process-tap path to capture
-  and control app audio. Grant it when prompted, or in
-  *System Settings → Privacy & Security → Microphone*.
-- **Screen Recording** — required for the screen recorder, and for the
-  ScreenCaptureKit fallback capture path. Grant it in
-  *System Settings → Privacy & Security → Screen Recording*.
+| Permission | Needed for | Asked when |
+|------------|------------|------------|
+| **System Audio Recording** | Controlling an app's volume/output, recording app audio, audio in screen recordings | You first adjust an app |
+| **Screen Recording** | Screen recordings | You first press Record Screen |
 
-Nothing is written to disk unless you press Record.
+Aura doesn't use the microphone. If adjusted apps go quiet because access was
+denied, Aura shows a banner with **Open Settings** and **Try Again**. Audio is
+processed on your Mac and never leaves it.
 
 ## Building
 
-Aura uses [XcodeGen](https://github.com/yonghyun/XcodeGen); `project.yml` is the
-source of truth and `AudioMixer.xcodeproj` is generated from it.
+[XcodeGen](https://github.com/yonghyun/XcodeGen) generates the Xcode project
+from `project.yml` (the `.xcodeproj` isn't checked in).
 
 ```bash
-brew install xcodegen        # once
-xcodegen generate            # regenerate the Xcode project
+brew install xcodegen
+xcodegen generate
 xcodebuild -project AudioMixer.xcodeproj -scheme AudioMixer -configuration Debug build
 ```
 
-Or open `AudioMixer.xcodeproj` in Xcode and run. The built product is named
-**Aura.app** (bundle id `com.hassan.Aura`).
+### Signing
 
-### Stable local signing (so permissions stick)
+`Signing.xcconfig` signs ad-hoc by default so a fresh clone always builds.
+Override per machine in `Local.xcconfig` (git-ignored; see
+`Local.xcconfig.example`):
 
-By default the app is signed **ad-hoc**, which works but re-signs on every build —
-so macOS treats each rebuild as a new app and you have to re-grant Screen
-Recording and Microphone every time.
+- **Local development** — run `./scripts/setup-local-signing.sh` once. It creates
+  a stable self-signed identity so macOS privacy grants survive rebuilds (ad-hoc
+  signatures change every build, so grants would reset).
+- **App Store / TestFlight** — set your Apple Developer Team ID in
+  `Local.xcconfig` (Option B in the example). See [APP_STORE.md](APP_STORE.md).
 
-To sign with a stable self-signed identity instead (grant permissions once, and
-they persist across rebuilds), run the one-time setup:
+## How it works
 
-```bash
-./scripts/setup-local-signing.sh   # creates the "Aura Local Signing" identity
-xcodegen generate                  # (only needed if project.yml changed)
-xcodebuild -project AudioMixer.xcodeproj -scheme AudioMixer -configuration Debug build
-```
+**Per-app control.** The first time you adjust an app, Aura creates a Core Audio
+*process tap* (`CATapDescription`) over all of that app's audio processes, set to
+mute them at the hardware while tapped. The tap and your chosen output device
+are combined in one private aggregate device, so every IO cycle hands Aura the
+app's samples and the output buffer together: it applies volume/balance (with
+click-free ramping) and writes straight to the device — no extra buffering, and
+clock drift is compensated by Core Audio. "Reset to Normal Audio" removes the
+tap and hands the app back to macOS.
 
-The script creates a self-signed code-signing certificate in your login keychain
-and writes `Local.xcconfig` (git-ignored) pointing the build at it. After that,
-grant Screen Recording + Microphone to Aura **once** in
-*System Settings → Privacy & Security* — the grants survive future rebuilds
-because the code signature (and its designated requirement) stays constant.
-
-If you have an Apple Developer account, you can instead set `DEVELOPMENT_TEAM`
-and use automatic signing; that's equally stable.
+**Screen recording.** ScreenCaptureKit provides the video; audio comes from a
+separate global tap. Taps see an app's audio *before* the hardware mute, so a
+plain system capture would contain both an adjusted app's original and Aura's
+copy. The recording tap therefore excludes the apps Aura is routing and
+includes Aura's own output — exactly what you hear — and updates that list live.
 
 ## Project layout
 
 ```
 Sources/
-  AudioMixerApp.swift            App entry point, menu-bar status item + dropdown window
-  Helpers/AppState.swift         Observable app/device state, capture lifecycle, permissions
+  AudioMixerApp.swift             App entry: menu bar extra, mixer window, Settings
   Audio/
-    AudioDeviceManager.swift     CoreAudio (HAL) output-device queries and default routing
-    AudioCaptureEngine.swift     Playback engine; prefers process taps, falls back to SCK
-    ProcessTapCapture.swift      Core Audio process tap (taps + mutes one app's audio)
-    ScreenRecorder.swift         ScreenCaptureKit → AVAssetWriter screen + audio recorder
-  Views/
-    MenuBarDropdownView.swift    Primary compact mixer surface
-    MainWindowView.swift         Full window: mixer grid, spatial tab, inspector
-    SharedComponents.swift       Shared slider, level meter, device icons, record control, banner
-Resources/                       Info.plist, entitlements, app icons
+    AudioHAL.swift                Typed Core Audio property helpers, audio-process list
+    AudioDeviceManager.swift      Output devices, default output, change notifications
+    AppAudioRoute.swift           One app's tap + aggregate device + real-time mixing
+    AudioRouter.swift             Owns live routes and per-app recorders
+    SystemAudioCapture.swift      "What you hear" tap used for screen-recording audio
+    ScreenRecorder.swift          ScreenCaptureKit video + AVAssetWriter muxing
+  Helpers/
+    AppState.swift                Apps, helper-process attribution, settings → routes
+    RecordingLocation.swift       Recording folders (security-scoped bookmarks)
+    SelfTest.swift                Debug-only automated checks (compiled out of Release)
+  Views/                          Menu bar, mixer window, Settings, shared components
+Resources/                        Info.plist, entitlements, privacy manifest, assets
+Design/LegacyIcons/               Earlier icon designs (not part of the build)
 ```
 
-## How the audio path works
+## Debug self-tests
 
-1. When you first touch an app's controls, Aura starts a capture stream for it
-   (lazily — nothing is tapped until you interact).
-2. It prefers a **Core Audio process tap** (`CATapDescription` +
-   `AudioHardwareCreateProcessTap` in a private aggregate device). The tap
-   captures the app's audio and mutes its normal output.
-3. Captured PCM is played back through an `AVAudioEngine` bound to the app's
-   chosen output device, applying your volume / mute / pan in the render callback.
-4. If a tap can't be created, it falls back to ScreenCaptureKit audio capture
-   (which captures but does not mute the original — so you may hear it twice
-   until a virtual device like BlackHole is used).
+Debug builds accept launch arguments that exercise the real audio paths without
+the UI, reporting to stderr and the unified log (`subsystem: com.hassan.Aura`):
+
+```bash
+AURA=…/Debug/Aura.app/Contents/MacOS/Aura
+afplay tone.wav & "$AURA" -AuraSelfTestRoutePID $! -AuraSelfTestVolume 0.5   # tap + route + levels
+"$AURA" -AuraSelfTestScreenSeconds 4                                          # screen recording + analysis
+"$AURA" -AuraSelfTestEnvironment YES                                          # sandbox capabilities
+"$AURA" -AuraSelfTestIdleSeconds 20                                           # idle CPU
+```
+
+None of this code exists in Release builds.
