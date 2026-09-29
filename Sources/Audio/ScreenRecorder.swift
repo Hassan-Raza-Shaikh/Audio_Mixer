@@ -38,6 +38,8 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
     private var audioInput: AVAssetWriterInput?     // writerQueue
     private var sessionStarted = false              // writerQueue
     private var isFinishing = false                 // writerQueue
+    private var audioFormat: CMAudioFormatDescription?  // writerQueue — for synthesized silence
+    private var nextAudioTime = CMTime.invalid      // writerQueue — how far the audio track reaches
 
     enum RecorderError: LocalizedError {
         case noDisplay, cannotAddVideo
@@ -100,19 +102,16 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
             var audioCapture: SystemAudioCapture?
             if wantAudio {
-                let router = AudioRouter.shared
-                let capture = SystemAudioCapture(excluding: router.routedProcessObjects) { [weak self] sampleBuffer in
-                    self?.appendAudio(sampleBuffer)
-                }
+                let capture = makeSystemAudioCapture()
                 try capture.start()
-                router.onRoutesChanged = { [weak capture] in
-                    capture?.updateExclusions(AudioRouter.shared.routedProcessObjects)
-                }
                 audioCapture = capture
+                AudioRouter.shared.onRoutesChanged = { [weak self] in
+                    Task { @MainActor in self?.routesChangedWhileRecording() }
+                }
             }
             self.systemAudio = audioCapture
 
-            try await prepareWriter(url: url, width: width, height: height, audioSampleRate: audioCapture?.sampleRate)
+            try await prepareWriter(url: url, width: width, height: height, audioFormat: audioCapture?.streamFormat)
 
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: writerQueue)
@@ -126,8 +125,34 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
         } catch {
             log.error("Couldn't start recording: \(error.localizedDescription, privacy: .public)")
             stopSystemAudio()
-            _ = await finishWriting()
+            _ = await finishWriting(endTime: .invalid)
             AppState.shared.showNotice("Couldn't start screen recording: \(error.localizedDescription)")
+        }
+    }
+
+    private func makeSystemAudioCapture() -> SystemAudioCapture {
+        SystemAudioCapture(excluding: AudioRouter.shared.routedProcessObjects) { [weak self] sampleBuffer in
+            self?.appendAudio(sampleBuffer)
+        }
+    }
+
+    /// The user adjusted (or reset) an app mid-recording. Rebuild the audio tap
+    /// so it leaves out exactly the apps Aura is now routing — a gap of a few
+    /// milliseconds instead of the original and Aura's copy cancelling out.
+    @MainActor
+    private func routesChangedWhileRecording() {
+        guard let current = systemAudio else { return }
+        let routed = AudioRouter.shared.routedProcessObjects
+        guard Set(routed) != Set(current.excludedProcesses) else { return }
+        current.stop()
+        let replacement = makeSystemAudioCapture()
+        do {
+            try replacement.start()
+            systemAudio = replacement
+        } catch {
+            systemAudio = nil
+            log.error("Couldn't restart recording audio: \(String(describing: error), privacy: .public)")
+            AppState.shared.showNotice("The recording's audio stopped because the audio setup changed.")
         }
     }
 
@@ -149,12 +174,15 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
         guard isRecording else { return }
         isRecording = false
         stopTimer()
+        // The movie ends *now*, even if the screen hasn't changed for a while
+        // (ScreenCaptureKit only delivers frames when something changes).
+        let endTime = CMClockGetTime(CMClockGetHostTimeClock())
         let stream = self.stream
         self.stream = nil
 
         try? await stream?.stopCapture()
         stopSystemAudio()
-        if let url = await finishWriting() {
+        if let url = await finishWriting(endTime: endTime) {
             lastOutputURL = url
             AppState.shared.showNotice("Saved “\(url.lastPathComponent)”", reveal: url)
         } else {
@@ -170,10 +198,14 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - Writer
 
-    /// `audioSampleRate == nil` means video only.
-    private func prepareWriter(url: URL, width: Int, height: Int, audioSampleRate: Double?) async throws {
+    /// `audioFormat == nil` means video only.
+    private func prepareWriter(url: URL, width: Int, height: Int, audioFormat: CMAudioFormatDescription?) async throws {
+        let format = UncheckedSendable(value: audioFormat)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             writerQueue.async { [self] in
+                let audioFormat = format.value
+                let audioSampleRate = audioFormat
+                    .flatMap { CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee.mSampleRate }
                 // H.264 plays everywhere but tops out at 4096×2304; use HEVC beyond that.
                 let useHEVC = width > 4096 || height > 2304
                 let videoSettings: [String: Any] = [
@@ -213,6 +245,8 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
                     self.writer = writer
                     self.videoInput = video
                     self.audioInput = audioInput
+                    self.audioFormat = audioFormat
+                    self.nextAudioTime = .invalid
                     self.sessionStarted = false
                     self.isFinishing = false
                     continuation.resume()
@@ -223,9 +257,9 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Finalizes the movie. Returns its URL, or nil if nothing usable was
-    /// written (in which case the empty file is removed).
-    private func finishWriting() async -> URL? {
+    /// Finalizes the movie, extending it to `endTime`. Returns its URL, or nil
+    /// if nothing usable was written (in which case the empty file is removed).
+    private func finishWriting(endTime: CMTime) async -> URL? {
         await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
             writerQueue.async { [self] in
                 isFinishing = true
@@ -240,6 +274,12 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
                     resetWriter()
                     continuation.resume(returning: nil)
                     return
+                }
+                if endTime.isValid {
+                    // Keep the audio track continuous to the very end, then hold
+                    // the last video frame until the moment Record was stopped.
+                    if audioInput != nil { appendSilence(until: endTime) }
+                    writer.endSession(atSourceTime: endTime)
                 }
                 videoInput?.markAsFinished()
                 audioInput?.markAsFinished()
@@ -263,8 +303,53 @@ final class ScreenRecorder: NSObject, ObservableObject, @unchecked Sendable {
         writer = nil
         videoInput = nil
         audioInput = nil
+        audioFormat = nil
+        nextAudioTime = .invalid
         sessionStarted = false
         isFinishing = false
+    }
+
+    /// Fills the audio track with silence from where it currently ends up to
+    /// `end`. The system-audio tap delivers nothing while the Mac is silent, so
+    /// without this, quiet stretches would be missing from the track (and a
+    /// fully silent recording would have no audio track at all). writerQueue.
+    private func appendSilence(until end: CMTime) {
+        guard let format = audioFormat, let input = audioInput, nextAudioTime.isValid,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
+              asbd.mSampleRate > 0 else { return }
+        let rate = asbd.mSampleRate
+        let isNonInterleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+        let bytesPerFrame = Int(asbd.mBytesPerFrame) * (isNonInterleaved ? Int(asbd.mChannelsPerFrame) : 1)
+
+        while CMTimeCompare(nextAudioTime, end) < 0 {
+            let remaining = Int((CMTimeSubtract(end, nextAudioTime).seconds * rate).rounded(.down))
+            let frames = min(remaining, Int(rate / 10))            // ≤ 100 ms per buffer
+            guard frames > 0, input.isReadyForMoreMediaData,
+                  let silence = Self.silentBuffer(frames: frames, bytesPerFrame: bytesPerFrame,
+                                                  format: format, at: nextAudioTime),
+                  input.append(silence) else { return }
+            nextAudioTime = CMTimeAdd(nextAudioTime, CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(rate)))
+        }
+    }
+
+    private static func silentBuffer(frames: Int, bytesPerFrame: Int,
+                                     format: CMAudioFormatDescription, at time: CMTime) -> CMSampleBuffer? {
+        let length = frames * bytesPerFrame
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: length,
+                                                 blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
+                                                 offsetToData: 0, dataLength: length,
+                                                 flags: kCMBlockBufferAssureMemoryNowFlag,
+                                                 blockBufferOut: &block) == kCMBlockBufferNoErr,
+              let block,
+              CMBlockBufferFillDataBytes(with: 0, blockBuffer: block, offsetIntoDestination: 0,
+                                         dataLength: length) == kCMBlockBufferNoErr else { return nil }
+        var sample: CMSampleBuffer?
+        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format,
+            sampleCount: frames, presentationTimeStamp: time, packetDescriptions: nil,
+            sampleBufferOut: &sample) == noErr else { return nil }
+        return sample
     }
 
     // MARK: - Helpers
@@ -325,6 +410,7 @@ extension ScreenRecorder: SCStreamOutput, SCStreamDelegate {
                 guard writer.startWriting() else { return }
                 writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
                 sessionStarted = true
+                nextAudioTime = sampleBuffer.presentationTimeStamp     // audio track starts here too
             }
             if writer.status == .writing, let input = videoInput, input.isReadyForMoreMediaData {
                 input.append(sampleBuffer)
@@ -340,8 +426,14 @@ extension ScreenRecorder: SCStreamOutput, SCStreamDelegate {
         writerQueue.async { [self] in
             // Audio before the first video frame is dropped: the timeline starts there.
             guard !isFinishing, sessionStarted, let writer, writer.status == .writing,
-                  let input = audioInput, input.isReadyForMoreMediaData else { return }
-            input.append(buffer.value)
+                  let input = audioInput else { return }
+            let sample = buffer.value
+            let start = sample.presentationTimeStamp
+            // Silence while nothing was playing (the tap delivers nothing then).
+            if CMTimeSubtract(start, nextAudioTime).seconds > 0.02 { appendSilence(until: start) }
+            guard input.isReadyForMoreMediaData, input.append(sample) else { return }
+            let end = CMTimeAdd(start, sample.duration)
+            if CMTimeCompare(end, nextAudioTime) > 0 { nextAudioTime = end }
         }
     }
 

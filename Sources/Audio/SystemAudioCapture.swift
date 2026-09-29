@@ -14,8 +14,11 @@ import os
 ///
 /// This capture is a global tap that **excludes the apps Aura is routing** and
 /// **includes Aura's own output**, which carries those apps at the user's
-/// volume/balance. The result is exactly what you hear. The exclusion list is
-/// updated live if routes change mid-recording.
+/// volume/balance. The result is exactly what you hear.
+///
+/// The exclusion list is fixed at creation: changing a live tap's process list
+/// (kAudioTapPropertyDescription) was measured to take effect unreliably, so
+/// callers rebuild the capture when routes change.
 final class SystemAudioCapture: @unchecked Sendable {
     typealias Handler = @Sendable (CMSampleBuffer) -> Void
 
@@ -23,6 +26,8 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     private(set) var sampleRate: Double = 48_000
     private let handler: Handler
+    /// Processes left out of the capture (the apps Aura is routing).
+    let excludedProcesses: [AudioObjectID]
     private let tapDescription: CATapDescription
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -35,8 +40,19 @@ final class SystemAudioCapture: @unchecked Sendable {
     /// Most recent buffer's peak level (diagnostics / metering).
     var currentPeak: Float { peak.withLock { $0 } }
 
+    /// Format of the delivered buffers (valid after `start()`). The tap is
+    /// silent — delivers nothing — while nothing plays, so the writer uses this
+    /// to synthesize silence for those gaps.
+    var streamFormat: CMAudioFormatDescription? { formatDescription }
+
+    #if DEBUG
+    /// (IO callbacks, callbacks whose tap input was empty) — diagnostics.
+    let debugCounts = OSAllocatedUnfairLock(initialState: (cycles: 0, empty: 0, noHostTime: 0))
+    #endif
+
     init(excluding processObjects: [AudioObjectID], handler: @escaping Handler) {
         self.handler = handler
+        excludedProcesses = processObjects
         tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: processObjects)
         tapDescription.name = "Aura – Recording"
         tapDescription.isPrivate = true
@@ -100,21 +116,6 @@ final class SystemAudioCapture: @unchecked Sendable {
         log.info("System audio capture started at \(Int(self.sampleRate)) Hz")
     }
 
-    /// Updates which processes are left out (the apps Aura is routing), without
-    /// interrupting the capture.
-    func updateExclusions(_ processObjects: [AudioObjectID]) {
-        guard tapID != kAudioObjectUnknown else { return }
-        tapDescription.processes = processObjects
-        var addr = AudioHAL.address(kAudioTapPropertyDescription)
-        var description = tapDescription
-        let status = withUnsafeMutablePointer(to: &description) {
-            AudioObjectSetPropertyData(tapID, &addr, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), $0)
-        }
-        if status != noErr {
-            log.error("Couldn't update recording exclusions (\(status))")
-        }
-    }
-
     func stop() {
         if aggregateID != kAudioObjectUnknown, let ioProcID {
             AudioDeviceStop(aggregateID, ioProcID)
@@ -135,6 +136,11 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     private func deliver(_ input: UnsafePointer<AudioBufferList>, at time: UnsafePointer<AudioTimeStamp>) {
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+        #if DEBUG
+        let isEmpty = list.first.map { $0.mDataByteSize == 0 || $0.mData == nil } ?? true
+        let noHostTime = !time.pointee.mFlags.contains(.hostTimeValid)
+        debugCounts.withLock { $0.cycles += 1; if isEmpty { $0.empty += 1 }; if noHostTime { $0.noHostTime += 1 } }
+        #endif
         guard let first = list.first, first.mDataByteSize > 0, let formatDescription,
               time.pointee.mFlags.contains(.hostTimeValid) else { return }
 

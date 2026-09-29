@@ -20,7 +20,7 @@ enum SelfTest {
 
     static var isRequested: Bool {
         ["AuraSelfTestRoutePID", "AuraSelfTestScreenSeconds", "AuraSelfTestEnvironment", "AuraSelfTestSnapshotDir",
-         "AuraSelfTestIdleSeconds", "AuraSelfTestProbeSeconds"]
+         "AuraSelfTestIdleSeconds", "AuraSelfTestProbeSeconds", "AuraSelfTestRecordThenRoutePID"]
             .contains { defaults.object(forKey: $0) != nil }
     }
 
@@ -33,6 +33,8 @@ enum SelfTest {
             Task { await environmentTest() }
         } else if let dir = defaults.string(forKey: "AuraSelfTestSnapshotDir") {
             Task { await snapshotTest(into: URL(fileURLWithPath: dir, isDirectory: true)) }
+        } else if defaults.object(forKey: "AuraSelfTestRecordThenRoutePID") != nil {
+            Task { await recordThenRouteTest(pid: pid_t(defaults.integer(forKey: "AuraSelfTestRecordThenRoutePID"))) }
         } else if defaults.object(forKey: "AuraSelfTestProbeSeconds") != nil {
             Task { await probeTest(seconds: defaults.double(forKey: "AuraSelfTestProbeSeconds")) }
         } else if defaults.object(forKey: "AuraSelfTestIdleSeconds") != nil {
@@ -81,6 +83,37 @@ enum SelfTest {
         finish(0)
     }
 
+    // MARK: - Route an app partway through a screen recording
+
+    /// Starts a screen recording, routes `pid` at 25% after 2 s, un-routes it
+    /// 2.5 s later, and reports the recording's 440 Hz level per 0.5 s.
+    /// Correct: 0.050 → 0.0125 → 0.050. If the recording tap didn't track the
+    /// route change, the original and Aura's copy would mix (≥ 0.0375).
+    private static func recordThenRouteTest(pid: pid_t) async {
+        let recorder = ScreenRecorder.shared
+        setRecordingAudio(true)
+        await recorder.start()
+        guard recorder.isRecording else { report("SCREEN START FAILED"); finish(4) }
+        try? await Task.sleep(for: .seconds(2))
+
+        let objects = AudioHAL.audioProcesses().filter { $0.pid == pid }.map(\.objectID)
+        guard !objects.isEmpty, let outputUID = AudioDeviceManager.shared.defaultOutputDeviceUID() else { finish(2) }
+        if case .failure(let error) = AudioRouter.shared.startRoute(pid: pid, appName: "selftest", processObjects: objects,
+                                                                    outputUID: outputUID, mix: .init(volume: 0.25, pan: 0, muted: false)) {
+            report("ROUTE FAILED: \(error.description)"); finish(3)
+        }
+        report("routed at 25% at t≈2s")
+        try? await Task.sleep(for: .seconds(2.5))
+        AudioRouter.shared.stopRoute(pid)
+        report("unrouted at t≈4.5s")
+        try? await Task.sleep(for: .seconds(2))
+
+        await recorder.stopAndSave()
+        guard let url = recorder.lastOutputURL else { report("SCREEN SAVE FAILED"); finish(5) }
+        await analyzeMovie(url)
+        finish(0)
+    }
+
     // MARK: - System mix probe
 
     /// Listens to everything every other process is playing (no muting, no
@@ -100,6 +133,8 @@ enum SelfTest {
         }
         probe.stop()
         report("system mix per-0.5s: " + windows.map { String(format: "%.3f", $0) }.joined(separator: " "))
+        let counts = probe.debugCounts.withLock { $0 }
+        report("IO callbacks=\(counts.cycles) empty input=\(counts.empty) no host time=\(counts.noHostTime)")
         finish(0)
     }
 
@@ -152,8 +187,18 @@ enum SelfTest {
 
     private static func finish(_ code: Int32) -> Never {
         AudioRouter.shared.stopAll()
+        // Put back the user's "include system audio" preference (tests change it).
+        if let saved = savedIncludeAudio { ScreenRecorder.shared.includeAudio = saved }
         report("DONE code=\(code)")
         exit(code)
+    }
+
+    private static var savedIncludeAudio: Bool?
+
+    /// Changes the recorder's audio setting for a test; `finish` restores it.
+    private static func setRecordingAudio(_ enabled: Bool) {
+        if savedIncludeAudio == nil { savedIncludeAudio = ScreenRecorder.shared.includeAudio }
+        ScreenRecorder.shared.includeAudio = enabled
     }
 
     /// CPU time (user + system) this process has used, in seconds.
@@ -215,7 +260,7 @@ enum SelfTest {
         if defaults.object(forKey: "AuraSelfTestAlsoRecordScreen") != nil {
             let recordSeconds = defaults.double(forKey: "AuraSelfTestAlsoRecordScreen")
             let recorder = ScreenRecorder.shared
-            recorder.includeAudio = true
+            setRecordingAudio(true)
             await recorder.start()
             try? await Task.sleep(for: .seconds(recordSeconds))
             await recorder.stopAndSave()
@@ -268,7 +313,7 @@ enum SelfTest {
 
     private static func screenTest(seconds: Double) async {
         let recorder = ScreenRecorder.shared
-        recorder.includeAudio = defaults.object(forKey: "AuraSelfTestScreenAudio") as? Bool ?? true
+        setRecordingAudio(defaults.object(forKey: "AuraSelfTestScreenAudio") as? Bool ?? true)
         report("sandboxed=\(ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil) folder=\(RecordingLocation.screen.url.path)")
         await recorder.start()
         guard recorder.isRecording else {
@@ -296,7 +341,10 @@ enum SelfTest {
         for track in tracks {
             let size = (try? await track.load(.naturalSize)) ?? .zero
             let fps = (try? await track.load(.nominalFrameRate)) ?? 0
-            report("  track \(track.mediaType.rawValue) \(Int(size.width))x\(Int(size.height)) fps=\(fps)")
+            let range = (try? await track.load(.timeRange)) ?? .zero
+            report(String(format: "  track %@ %dx%d fps=%.1f start=%.3fs duration=%.3fs",
+                          track.mediaType.rawValue, Int(size.width), Int(size.height), fps,
+                          range.start.seconds, range.duration.seconds))
         }
         guard let audio = try? await asset.loadTracks(withMediaType: .audio).first,
               let reader = try? AVAssetReader(asset: asset) else { report("  no audio track"); return }
@@ -309,6 +357,11 @@ enum SelfTest {
         var peak: Float = 0
         var windows: [Float] = []           // peak per 0.5 s (48 kHz stereo interleaved)
         var windowPeak: Float = 0, windowCount = 0
+        // Amplitude of just the 440 Hz test tone per 0.5 s (Goertzel on the left
+        // channel), so other audio playing on the Mac doesn't skew the result.
+        let coeff = 2 * cos(2 * Double.pi * 440 / 48_000)
+        var s1 = 0.0, s2 = 0.0, toneN = 0
+        var toneWindows: [Double] = []
         while let sample = output.copyNextSampleBuffer(), let block = CMSampleBufferGetDataBuffer(sample) {
             var length = 0
             var pointer: UnsafeMutablePointer<Int8>?
@@ -321,11 +374,21 @@ enum SelfTest {
                     windowPeak = max(windowPeak, v)
                     windowCount += 1
                     if windowCount == 48_000 { windows.append(windowPeak); windowPeak = 0; windowCount = 0 }
+                    if i % 2 == 0 {                                 // left channel
+                        let s = Double(floats[i]) + coeff * s1 - s2
+                        s2 = s1; s1 = s; toneN += 1
+                        if toneN == 24_000 {
+                            let power = s1 * s1 + s2 * s2 - coeff * s1 * s2
+                            toneWindows.append(2 * sqrt(max(0, power)) / Double(toneN))
+                            s1 = 0; s2 = 0; toneN = 0
+                        }
+                    }
                 }
             }
         }
         report(String(format: "  audio peak=%.4f", peak))
         report("  per-0.5s peaks: " + windows.map { String(format: "%.3f", $0) }.joined(separator: " "))
+        report("  440Hz tone per-0.5s: " + toneWindows.map { String(format: "%.3f", $0) }.joined(separator: " "))
     }
 }
 #endif

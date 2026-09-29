@@ -85,8 +85,11 @@ tap and hands the app back to macOS.
 **Screen recording.** ScreenCaptureKit provides the video; audio comes from a
 separate global tap. Taps see an app's audio *before* the hardware mute, so a
 plain system capture would contain both an adjusted app's original and Aura's
-copy. The recording tap therefore excludes the apps Aura is routing and
-includes Aura's own output — exactly what you hear — and updates that list live.
+copy (which partly cancel). The recording tap therefore excludes the apps Aura
+is routing and includes Aura's own output — exactly what you hear — and is
+rebuilt whenever you adjust or reset an app mid-recording. Silent stretches are
+filled with silence so the audio track always spans the whole video, and the
+movie ends exactly when you press Stop, even if the screen was static.
 
 ## Project layout
 
